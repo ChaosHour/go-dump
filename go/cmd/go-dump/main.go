@@ -203,9 +203,10 @@ func main() {
 		log.Fatalf("Unknown issolation level %s. Use --help for more information.", dumpOptions.TemporalOptions.IsolationLevel)
 	}
 
-	// Parsed consistent and making sure taht the isolation level is correct.
+	// Parsed consistent and making sure that the isolation level is correct.
 	if !consitent && dumpOptions.Consistent {
-		log.Fatalf("Isolation level \"%s\" is not compatible with the --consitent option. Use --help for more information about both options.")
+		log.Fatalf("Isolation level \"%s\" is not compatible with the --consitent option. Use --help for more information.",
+			dumpOptions.TemporalOptions.IsolationLevel)
 	}
 	// Setting OutputChunkSize to the same value as ChunkSize
 	// if the OutputChunkSize is 0
@@ -248,7 +249,7 @@ func main() {
 	dbchunks, err := utils.GetMySQLConnection(dumpOptions.MySQLHost, dumpOptions.MySQLCredentials)
 
 	if err != nil {
-		log.Critical("Error whith the database connection. %s", err.Error())
+		log.Critical("Error with the database connection: %s", err.Error())
 	}
 	log.Debug("Error TablesFromDatabase: ", err)
 
@@ -270,7 +271,7 @@ func main() {
 		}
 		if len(tablesFromString) > 0 {
 			if len(tablesToParse) > 0 {
-				for table, _ := range tablesFromString {
+				for table := range tablesFromString {
 					if _, ok := tablesToParse[table]; !ok {
 						tablesToParse[table] = true
 					}
@@ -283,7 +284,7 @@ func main() {
 
 	// Adding the utils to the task manager.
 	// We create one task per table
-	for table, _ := range tablesToParse {
+	for table := range tablesToParse {
 		t := strings.Split(table, ".")
 		task := utils.NewTask(
 			t[0], t[1],

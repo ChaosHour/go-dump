@@ -19,38 +19,38 @@ type Task struct {
 	chunkMax        int64
 }
 
-func (this *Task) AddChunk(chunk DataChunk) {
-	this.TaskManager.AddChunk(chunk)
-	this.TotalChunks = this.TotalChunks + 1
-	this.TaskManager.TotalChunks = this.TaskManager.TotalChunks + 1
-	this.TaskManager.Queue = this.TaskManager.Queue + 1
-	this.chunkMin = this.chunkMax + 1
-	log.Debugf("Queue +1: %d ", this.TaskManager.Queue)
+func (t *Task) AddChunk(chunk DataChunk) {
+	t.TaskManager.AddChunk(chunk)
+	t.TotalChunks = t.TotalChunks + 1
+	t.TaskManager.TotalChunks = t.TaskManager.TotalChunks + 1
+	t.TaskManager.Queue = t.TaskManager.Queue + 1
+	t.chunkMin = t.chunkMax + 1
+	log.Debugf("Queue +1: %d ", t.TaskManager.Queue)
 }
 
-func (this *Task) GetSingleChunkTestQuery() string {
-	return fmt.Sprintf("SELECT 1 FROM %s LIMIT 1 ", this.Table.GetFullName())
+func (t *Task) GetSingleChunkTestQuery() string {
+	return fmt.Sprintf("SELECT 1 FROM %s LIMIT 1 ", t.Table.GetFullName())
 }
 
-func (this *Task) GetChunkSqlQuery() string {
-	keyForChunks := this.Table.GetPrimaryOrUniqueKey()
+func (t *Task) GetChunkSqlQuery() string {
+	keyForChunks := t.Table.GetPrimaryOrUniqueKey()
 
-	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= %d LIMIT 1 OFFSET %d", keyForChunks, this.Table.GetFullName(), keyForChunks, this.chunkMax, this.ChunkSize)
+	query := fmt.Sprintf("SELECT %s FROM %s WHERE %s >= %d LIMIT 1 OFFSET %d", keyForChunks, t.Table.GetFullName(), keyForChunks, t.chunkMax, t.ChunkSize)
 
 	return query
 }
 
-func (this *Task) GetLastChunkSqlQuery() string {
+func (t *Task) GetLastChunkSqlQuery() string {
 
-	keyForChunks := this.Table.GetPrimaryOrUniqueKey()
+	keyForChunks := t.Table.GetPrimaryOrUniqueKey()
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s >= %d LIMIT 1",
-		keyForChunks, this.Table.GetFullName(), keyForChunks, this.chunkMin)
+		keyForChunks, t.Table.GetFullName(), keyForChunks, t.chunkMin)
 }
 
-func (this *Task) CreateChunks(db *sql.DB) {
-	this.TotalChunks = 0
-	this.chunkMax = 0
-	this.chunkMin = 0
+func (t *Task) CreateChunks(db *sql.DB) {
+	t.TotalChunks = 0
+	t.chunkMax = 0
+	t.chunkMin = 0
 
 	var (
 		tx       = db
@@ -60,57 +60,57 @@ func (this *Task) CreateChunks(db *sql.DB) {
 	)
 
 	defer func() {
-		this.TaskManager.CreateChunksWaitGroup.Done()
+		t.TaskManager.CreateChunksWaitGroup.Done()
 	}()
 
-	if len(this.Table.GetPrimaryOrUniqueKey()) == 0 {
-		switch this.TaskManager.TablesWithoutPKOption {
+	if len(t.Table.GetPrimaryOrUniqueKey()) == 0 {
+		switch t.TaskManager.TablesWithoutPKOption {
 		case "single-chunk":
-			log.Debugf(`Table %s doesn't have any primary or unique key, we will make it in a single chunk.`, this.Table.GetFullName())
-			err := tx.QueryRow(this.GetSingleChunkTestQuery()).Scan(&chunkMax)
+			log.Debugf(`Table %s doesn't have any primary or unique key, we will make it in a single chunk.`, t.Table.GetFullName())
+			err := tx.QueryRow(t.GetSingleChunkTestQuery()).Scan(&chunkMax)
 			switch err {
 			case nil:
-				this.AddChunk(NewSingleDataChunk(this))
+				t.AddChunk(NewSingleDataChunk(t))
 			case sql.ErrNoRows:
 				return
 			default:
-				log.Errorf("Error getting rows for table '%s'", this.Table.GetUnescapedFullName())
+				log.Errorf("Error getting rows for table '%s'", t.Table.GetUnescapedFullName())
 			}
 			return
 		case "error":
-			log.Fatalf(`The table %s doesn't have any primary or unique key and the --tables-without-uniquekey is "error"`, this.Table.GetFullName())
+			log.Fatalf(`The table %s doesn't have any primary or unique key and the --tables-without-uniquekey is "error"`, t.Table.GetFullName())
 		}
 	}
 
 	for !stopLoop {
 
-		err := tx.QueryRow(this.GetChunkSqlQuery()).Scan(&chunkMax)
+		err := tx.QueryRow(t.GetChunkSqlQuery()).Scan(&chunkMax)
 		if err != nil && err == sql.ErrNoRows {
 
-			err := tx.QueryRow(this.GetLastChunkSqlQuery()).Scan(&chunkMin)
+			err := tx.QueryRow(t.GetLastChunkSqlQuery()).Scan(&chunkMin)
 			if err == nil {
-				this.AddChunk(NewDataLastChunk(this))
+				t.AddChunk(NewDataLastChunk(t))
 			}
 			stopLoop = true
 		} else {
-			this.chunkMax = chunkMax
-			this.AddChunk(NewDataChunk(this))
+			t.chunkMax = chunkMax
+			t.AddChunk(NewDataChunk(t))
 		}
 	}
 
 	log.Debugf("Table processed %s - %d chunks created",
-		this.Table.GetFullName(), this.TotalChunks)
+		t.Table.GetFullName(), t.TotalChunks)
 
 }
 
-func (this *Task) PrintInfo() {
+func (t *Task) PrintInfo() {
 	var estimatedChunks = int(0)
-	chunks := float64(this.Table.estNumberOfRows) / float64(this.ChunkSize)
+	chunks := float64(t.Table.estNumberOfRows) / float64(t.ChunkSize)
 	if chunks > 0 {
 		estimatedChunks = int(chunks + 1)
 	}
 
-	log.Infof("Table: %s Engine: %s Estimated Chunks: %v", this.Table.GetUnescapedFullName(), this.Table.Engine, estimatedChunks)
+	log.Infof("Table: %s Engine: %s Estimated Chunks: %v", t.Table.GetUnescapedFullName(), t.Table.Engine, estimatedChunks)
 }
 
 func NewTask(schema string,

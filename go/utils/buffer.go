@@ -33,25 +33,31 @@ type Buffer struct {
 }
 
 // Write a slice of bytes into the buffer.
-func (this *Buffer) Write(b []byte) (int, error) {
-	return this.Buffer.Write(b)
+func (b *Buffer) Write(p []byte) (int, error) {
+	return b.Buffer.Write(p)
 }
 
 // Flush the buffer.
-func (this *Buffer) Flush() error {
-	return this.Buffer.Flush()
+func (b *Buffer) Flush() error {
+	return b.Buffer.Flush()
 }
 
 // Close execute the close statements for each buffer type.
-func (this *Buffer) Close() {
-	this.Flush()
-	switch this.Type {
-	case BufferTypeGzipFile:
-		this.GzipWriter.Close()
-		this.FileDescriptor.Close()
-	case BufferTypeFile:
-		this.FileDescriptor.Close()
+func (b *Buffer) Close() error {
+	if err := b.Flush(); err != nil {
+		return err
 	}
+
+	switch b.Type {
+	case BufferTypeGzipFile:
+		if err := b.GzipWriter.Close(); err != nil {
+			return err
+		}
+		return b.FileDescriptor.Close()
+	case BufferTypeFile:
+		return b.FileDescriptor.Close()
+	}
+	return nil
 }
 
 func NewBuffer(options *BufferOptions) (*Buffer, error) {
