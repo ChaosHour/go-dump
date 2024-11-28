@@ -86,5 +86,4 @@ func TestLoadIniFile(t *testing.T) {
 	if testOptions.MySQLCredentials.User != dumpOptions.MySQLCredentials.User {
 		t.Errorf("MySQL user shouldn't change.")
 	}
-	return
 }

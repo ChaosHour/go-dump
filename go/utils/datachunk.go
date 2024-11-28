@@ -19,50 +19,50 @@ type DataChunk struct {
 }
 
 // GetWhereSQL return the where condition for a chunk
-func (this *DataChunk) GetWhereSQL() string {
-	if this.IsSingleChunk {
+func (dc *DataChunk) GetWhereSQL() string {
+	if dc.IsSingleChunk {
 		return ""
 	}
 
-	if this.IsLastChunk {
-		return fmt.Sprintf(" WHERE %s >= ?", this.Task.Table.GetPrimaryOrUniqueKey())
+	if dc.IsLastChunk {
+		return fmt.Sprintf(" WHERE %s >= ?", dc.Task.Table.GetPrimaryOrUniqueKey())
 	} else {
-		return fmt.Sprintf(" WHERE %s BETWEEN ? AND ?", this.Task.Table.GetPrimaryOrUniqueKey())
+		return fmt.Sprintf(" WHERE %s BETWEEN ? AND ?", dc.Task.Table.GetPrimaryOrUniqueKey())
 	}
 }
 
-func (this *DataChunk) GetOrderBYSQL() string {
-	if this.IsSingleChunk {
+func (dc *DataChunk) GetOrderBYSQL() string {
+	if dc.IsSingleChunk {
 		return ""
 	}
 
-	return fmt.Sprintf(" ORDER BY %s", this.Task.Table.GetPrimaryOrUniqueKey())
+	return fmt.Sprintf(" ORDER BY %s", dc.Task.Table.GetPrimaryOrUniqueKey())
 }
 
-func (this *DataChunk) GetPrepareSQL() string {
+func (dc *DataChunk) GetPrepareSQL() string {
 
 	return fmt.Sprintf("SELECT /*!40001 SQL_NO_CACHE */ * FROM %s%s%s",
-		this.Task.Table.GetFullName(), this.GetWhereSQL(), this.GetOrderBYSQL())
+		dc.Task.Table.GetFullName(), dc.GetWhereSQL(), dc.GetOrderBYSQL())
 
 }
 
-func (this *DataChunk) GetSampleSQL() string {
-	return fmt.Sprintf("SELECT * FROM %s LIMIT 1", this.Task.Table.GetFullName())
+func (dc *DataChunk) GetSampleSQL() string {
+	return fmt.Sprintf("SELECT * FROM %s LIMIT 1", dc.Task.Table.GetFullName())
 }
 
-func (this *DataChunk) Parse(stmt *sql.Stmt, buffer *Buffer) error {
+func (dc *DataChunk) Parse(stmt *sql.Stmt, buffer *Buffer) error {
 
 	var rows *sql.Rows
 	var err error
-	if this.IsSingleChunk {
-		log.Debugf("Is single chunk %s.", this.Task.Table.GetFullName())
+	if dc.IsSingleChunk {
+		log.Debugf("Is single chunk %s.", dc.Task.Table.GetFullName())
 		rows, err = stmt.Query()
 	} else {
-		if this.IsLastChunk {
-			rows, err = stmt.Query(this.Min)
-			log.Debugf("Last chunk %s.", this.Task.Table.GetFullName())
+		if dc.IsLastChunk {
+			rows, err = stmt.Query(dc.Min)
+			log.Debugf("Last chunk %s.", dc.Task.Table.GetFullName())
 		} else {
-			rows, err = stmt.Query(this.Min, this.Max)
+			rows, err = stmt.Query(dc.Min, dc.Max)
 		}
 	}
 
@@ -70,19 +70,19 @@ func (this *DataChunk) Parse(stmt *sql.Stmt, buffer *Buffer) error {
 		log.Fatalf("%s", err.Error())
 	}
 
-	tablename := this.Task.Table.GetFullName()
+	tablename := dc.Task.Table.GetFullName()
 
-	if this.IsSingleChunk {
+	if dc.IsSingleChunk {
 		fmt.Fprintf(buffer, "-- Single chunk on %s\n", tablename)
 	} else {
 		fmt.Fprintf(buffer, "-- Chunk %d - from %d to %d\n",
-			this.Sequence, this.Min, this.Max)
+			dc.Sequence, dc.Min, dc.Max)
 	}
 
 	columns, _ := rows.ColumnTypes()
 	buff := make([]interface{}, len(columns))
 	data := make([]interface{}, len(columns))
-	for i, _ := range buff {
+	for i := range buff {
 		buff[i] = &data[i]
 	}
 	firstRow := true
@@ -91,22 +91,19 @@ func (this *DataChunk) Parse(stmt *sql.Stmt, buffer *Buffer) error {
 	for rows.Next() {
 
 		/*
-			if rowsNumber > 0 && rowsNumber%this.Task.OutputChunkSize == 0 {
+			if rowsNumber > 0 && rowsNumber%dc.Task.OutputChunkSize == 0 {
 				fmt.Fprintf(buffer, ");\n\n")
 				firstRow = true
 			}
 		*/
 
 		if firstRow {
-			fmt.Fprintf(buffer, "INSERT INTO %s VALUES \n(", this.Task.Table.GetName())
+			fmt.Fprintf(buffer, "INSERT INTO %s VALUES \n(", dc.Task.Table.GetName())
 		}
 		err = rows.Scan(buff...)
 
 		if err != nil {
 			panic(err.Error()) // proper error handling instead of panic in your app
-		}
-		if err != nil {
-			fmt.Println("error:", err)
 		}
 		if !firstRow {
 			fmt.Fprintf(buffer, "),\n(")

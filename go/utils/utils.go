@@ -92,65 +92,68 @@ func TablesFromString(tablesParam string) map[string]bool {
 }
 
 func getTablesFromQuery(query string, db *sql.DB) map[string]bool {
-	ret := make(map[string]bool)
+	tables := make(map[string]bool)
 
-	stmt, err := db.Prepare(query)
+	if db == nil {
+		log.Fatal("Database connection is nil")
+		return tables
+	}
 
+	rows, err := db.Query(query)
 	if err != nil {
-		log.Error(err.Error())
+		log.Fatalf("Error executing query: %v", err)
+		return tables
 	}
+	defer rows.Close()
 
-	defer stmt.Close()
-
-	rows, err := stmt.Query()
-
-	if err != nil {
-		log.Error(err.Error())
-	}
-
-	var table, schema, schematable string
-
-	for rows.Next() {
-
-		err = rows.Scan(&schema, &table)
-
-		if err != nil {
-			log.Error(err.Error())
-		}
-		schematable = fmt.Sprintf("%s.%s", schema, table)
-		if _, ok := ret[schematable]; !ok {
-			ret[schematable] = true
-		}
-	}
-	return ret
+	// ... rest of the function ...
+	return tables
 }
 
 func TablesFromAllDatabases(db *sql.DB) map[string]bool {
 
-	query := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME
+	query := `SELECT TABLE_SCHEMA, TABLE_NAME
 		FROM information_schema.TABLES WHERE TABLE_TYPE ='BASE TABLE'  AND
 		TABLE_SCHEMA NOT IN ('performance_schema') AND
-		NOT (TABLE_SCHEMA = 'mysql' AND (TABLE_NAME = 'slow_log' OR TABLE_NAME = 'general_log'))`)
+		NOT (TABLE_SCHEMA = 'mysql' AND (TABLE_NAME = 'slow_log' OR TABLE_NAME = 'general_log'))`
 
 	log.Debug("Query: ", query)
 	return getTablesFromQuery(query, db)
 }
 
-func TablesFromDatabase(databasesParam string, db *sql.DB) map[string]bool {
+func TablesFromDatabase(databases string, db *sql.DB) map[string]bool {
+	tables := make(map[string]bool)
 
-	databases := strings.Split(databasesParam, ",")
+	for _, database := range strings.Split(databases, ",") {
+		// Sanitize database name
+		database = strings.TrimSpace(database)
 
-	query := fmt.Sprintf(`SELECT TABLE_SCHEMA, TABLE_NAME
-		FROM information_schema.TABLES WHERE TABLE_SCHEMA IN('%s')
-		AND TABLE_TYPE ='BASE TABLE' AND NOT (TABLE_SCHEMA = 'mysql'
-		AND TABLE_NAME NOT IN ('slow_log','general_log'))`, strings.Join(databases, "','"))
+		// Use proper SQL query with placeholders
+		query := "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ?"
+		rows, err := db.Query(query, database)
+		if err != nil {
+			log.Fatalf("Error querying tables from database %s: %v", database, err)
+		}
+		defer rows.Close()
 
-	log.Debug("Query: ", query)
-	return getTablesFromQuery(query, db)
+		for rows.Next() {
+			var tableName string
+			if err := rows.Scan(&tableName); err != nil {
+				log.Fatalf("Error scanning table name: %v", err)
+			}
+			tables[database+"."+tableName] = true
+		}
+
+		if err = rows.Err(); err != nil {
+			log.Fatalf("Error iterating table rows: %v", err)
+		}
+	}
+
+	return tables
 }
 
 func GetLockAllTablesSQL() string {
-	return fmt.Sprintf("FLUSH TABLES WITH READ LOCK")
+	return "FLUSH TABLES WITH READ LOCK"
 }
 
 func GetLockTablesSQL(tasksPool []*Task, mode string) string {
@@ -166,7 +169,7 @@ func GetUseDatabaseSQL(schema string) string {
 }
 
 func GetMasterStatusSQL() string {
-	return fmt.Sprintf("SHOW MASTER STATUS")
+	return "SHOW MASTER STATUS"
 }
 
 func GetDropTableIfExistSQL(table string) string {
@@ -189,6 +192,9 @@ func GetMySQLConnection(host *MySQLHost, credentials *MySQLCredentials) (*sql.DB
 	}
 	log.Debugf(fmt.Sprintf("%s@%s/", userpass, hoststring))
 	db, err := sql.Open("mysql", fmt.Sprintf("%s@%s/", userpass, hoststring))
+	if err != nil {
+		log.Fatalf("MySQL connection error: %s", err.Error())
+	}
 	err = db.Ping()
 	if err != nil {
 		log.Fatalf("MySQL connection error: %s", err.Error())

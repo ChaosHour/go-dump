@@ -28,13 +28,13 @@ type Table struct {
 
 // getColumnsInformationSQL return the SQL statment to get the columns
 // information of a table
-func (this *Table) getColumnsInformationSQL() string {
+func (t *Table) getColumnsInformationSQL() string {
 	return fmt.Sprintf(`SELECT COLUMN_NAME,COLUMN_KEY
 		FROM INFORMATION_SCHEMA.COLUMNS
 		WHERE TABLE_SCHEMA='%s' AND TABLE_NAME='%s'
 		  AND COLUMN_KEY IN ('PRI','UNI','MUL')
 			AND DATA_TYPE IN ('tinyint','smallint','int','mediumint','bigint','timestamp')
-			`, this.GetUnescapedSchema(), this.GetUnescapedName())
+				`, t.GetUnescapedSchema(), t.GetUnescapedName())
 }
 
 /*
@@ -62,62 +62,62 @@ CREATE_OPTIONS:
 */
 
 // GetFullName return a string with database and table name escaped.
-func (this *Table) GetFullName() string {
-	return fmt.Sprintf("`%s`.`%s`", this.schema, this.name)
+func (t *Table) GetFullName() string {
+	return fmt.Sprintf("`%s`.`%s`", t.schema, t.name)
 }
 
 // GetSchema return a string with the database name escaped.
-func (this *Table) GetSchema() string {
-	return fmt.Sprintf("`%s`", this.schema)
+func (t *Table) GetSchema() string {
+	return fmt.Sprintf("`%s`", t.schema)
 }
 
 // GetName return a string with the table name escaped.
-func (this *Table) GetName() string {
-	return fmt.Sprintf("`%s`", this.name)
+func (t *Table) GetName() string {
+	return fmt.Sprintf("`%s`", t.name)
 }
 
 // GetUnescapedSchema return a string with the database name.
-func (this *Table) GetUnescapedSchema() string {
-	return fmt.Sprintf("%s", this.schema)
+func (t *Table) GetUnescapedSchema() string {
+	return t.schema
 }
 
 // GetUnescapedName return a string with the table name.
-func (this *Table) GetUnescapedName() string {
-	return fmt.Sprintf("%s", this.name)
+func (t *Table) GetUnescapedName() string {
+	return t.name
 }
 
 // GetUnescapedFullName return a string with database and table name.
-func (this *Table) GetUnescapedFullName() string {
-	return fmt.Sprintf("%s.%s", this.schema, this.name)
+func (t *Table) GetUnescapedFullName() string {
+	return fmt.Sprintf("%s.%s", t.schema, t.name)
 }
 
 // GetPrimaryOrUniqueKey return a string with the name of the unique or primary
 // key filed that we will use to split the table.
 // Empty string means that the table doens't have any primary or unique key to use.
-func (this *Table) GetPrimaryOrUniqueKey() string {
+func (t *Table) GetPrimaryOrUniqueKey() string {
 
-	if len(this.keyForChunks) > 0 {
-		return this.keyForChunks
+	if len(t.keyForChunks) > 0 {
+		return t.keyForChunks
 	}
 
-	if len(this.primaryKey) == 1 {
-		this.keyForChunks = this.primaryKey[0]
-		return this.keyForChunks
+	if len(t.primaryKey) == 1 {
+		t.keyForChunks = t.primaryKey[0]
+		return t.keyForChunks
 	}
 
-	if len(this.uniqueKey) > 0 {
-		this.keyForChunks = this.uniqueKey[0]
-		return this.keyForChunks
+	if len(t.uniqueKey) > 0 {
+		t.keyForChunks = t.uniqueKey[0]
+		return t.keyForChunks
 	}
 
 	return ""
 }
 
 // getTableInformation collect and store the table information
-func (this *Table) getTableInformation(db *sql.DB) error {
+func (t *Table) getTableInformation(db *sql.DB) error {
 
 	var tableName string
-	err := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE %s", this.GetFullName())).Scan(&tableName, &this.CreateTableSQL)
+	err := db.QueryRow(fmt.Sprintf("SHOW CREATE TABLE %s", t.GetFullName())).Scan(&tableName, &t.CreateTableSQL)
 	if err != nil {
 		log.Fatalf("Error getting show create table: %s", err.Error())
 	}
@@ -125,21 +125,21 @@ func (this *Table) getTableInformation(db *sql.DB) error {
 	query := fmt.Sprintf(`SELECT ENGINE, TABLE_COLLATION, DATA_LENGTH, INDEX_LENGTH,
 		TABLE_ROWS FROM INFORMATION_SCHEMA.TABLES
 		WHERE TABLE_TYPE='BASE TABLE' AND TABLE_SCHEMA='%s' AND TABLE_NAME='%s'`,
-		this.GetUnescapedSchema(), this.GetUnescapedName())
-	err = db.QueryRow(query).Scan(&this.Engine, &this.Collation,
-		&this.estDataSize, &this.estIndexSize, &this.estNumberOfRows)
+		t.GetUnescapedSchema(), t.GetUnescapedName())
+	err = db.QueryRow(query).Scan(&t.Engine, &t.Collation,
+		&t.estDataSize, &t.estIndexSize, &t.estNumberOfRows)
 	return err
 }
 
 // getData collect the table information
-func (this *Table) getData(db *sql.DB) error {
+func (t *Table) getData(db *sql.DB) error {
 
-	this.getTableInformation(db)
+	t.getTableInformation(db)
 
-	rows, err := db.Query(this.getColumnsInformationSQL())
+	rows, err := db.Query(t.getColumnsInformationSQL())
 
-	if err != nil && err != sql.ErrNoRows {
-		log.Fatal("Error getting column details for table ", this.GetFullName(), " : ", err.Error())
+	if err != nil {
+		log.Fatal("Error getting column details for table ", t.GetFullName(), " : ", err.Error())
 	}
 
 	var cName, cKey string
@@ -148,9 +148,9 @@ func (this *Table) getData(db *sql.DB) error {
 		rows.Scan(&cName, &cKey)
 		switch cKey {
 		case "PRI":
-			this.primaryKey = append(this.primaryKey, cName)
+			t.primaryKey = append(t.primaryKey, cName)
 		case "UNI":
-			this.uniqueKey = append(this.uniqueKey, cName)
+			t.uniqueKey = append(t.uniqueKey, cName)
 		default:
 
 		}
