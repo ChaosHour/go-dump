@@ -20,6 +20,17 @@ import (
 	"github.com/outbrain/golib/log"
 )
 
+// normalizeTableName converts a table name like "schema.table" to "`schema`.`table`"
+func normalizeTableName(tableName string) string {
+	if strings.Contains(tableName, ".") {
+		parts := strings.Split(tableName, ".")
+		if len(parts) == 2 {
+			return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
+		}
+	}
+	return tableName
+}
+
 // WaitGroup for the creation of the chunks
 var wgCreateChunks sync.WaitGroup
 
@@ -48,7 +59,7 @@ func printOption(w io.Writer, f *flag.Flag) {
 func PrintUsage(flags map[string]*flag.Flag) {
 
 	w := tabwriter.NewWriter(os.Stdout, 30, 0, 1, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute ] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-level] [--ini-files str]")
+	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute ] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-level] [--where str] [--ini-files str]")
 
 	fmt.Fprintln(w, "go-dump dumps a database or a table from a MySQL server and creates the SQL statements to recreate a table. This tool create one file per table per thread in the destination directory")
 	fmt.Fprint(w, "Example: go-dump --destination /tmp/dbdump --databases mydb --mysql-user myuser --mysql-password password\n\n")
@@ -57,7 +68,7 @@ func PrintUsage(flags map[string]*flag.Flag) {
 	fmt.Fprintln(w, "# General:")
 	for _, opt := range []string{"help", "dry-run", "execute", "debug", "quiet", "version",
 		"lock-tables", "channel-buffer-size", "chunk-size", "tables-without-uniquekey",
-		"threads", "compress", "compress-level", "consistent", "isolation-level", "ini-file"} {
+		"threads", "compress", "compress-level", "consistent", "isolation-level", "where", "ini-file"} {
 		printOption(w, flags[opt])
 	}
 
@@ -118,9 +129,32 @@ func main() {
 	flag.BoolVar(&dumpOptions.TemporalOptions.Quiet, "quiet", false, "Do not display INFO messages during the process.")
 	flag.StringVar(&dumpOptions.TemporalOptions.IsolationLevel, "isolation-level", "REPEATABLE READ", "Isolation level to use. If you need a consitent backup, leave the default 'REPEATABLE READ', other options READ COMMITTED, READ UNCOMMITTED and SERIALIZABLE.")
 	flag.BoolVar(&dumpOptions.Consistent, "consistent", true, "Get a consistent backup.")
+	var dummyWhere string
+	flag.StringVar(&dummyWhere, "where", "", "Custom WHERE condition for selective dumping (e.g., \"status = 'active'\" or \"table:condition,table2:condition2\").")
 	flag.StringVar(&flagIniFile, "ini-file", "", "INI file to read the configuration options.")
 
 	flag.Parse()
+
+	// Parse WHERE conditions from command line
+	if dummyWhere != "" {
+		whereValue := dummyWhere
+		if strings.Contains(whereValue, ":") {
+			// Table-specific: "table:condition,table2:condition2"
+			parts := strings.Split(whereValue, ",")
+			if dumpOptions.WhereConditions == nil {
+				dumpOptions.WhereConditions = make(map[string]string)
+			}
+			for _, part := range parts {
+				if tableCond := strings.SplitN(strings.TrimSpace(part), ":", 2); len(tableCond) == 2 {
+					normalizedTableName := normalizeTableName(tableCond[0])
+					dumpOptions.WhereConditions[normalizedTableName] = tableCond[1]
+				}
+			}
+		} else {
+			// Global WHERE condition
+			dumpOptions.GlobalWhereCondition = whereValue
+		}
+	}
 
 	// Collect the flags that were assigned from the command line.
 	flag.Visit(func(f *flag.Flag) { flagSet[f.Name] = true })

@@ -11,6 +11,17 @@ import (
 	ini "gopkg.in/ini.v1"
 )
 
+// normalizeTableName converts a table name like "schema.table" to "`schema`.`table`"
+func normalizeTableName(tableName string) string {
+	if strings.Contains(tableName, ".") {
+		parts := strings.Split(tableName, ".")
+		if len(parts) == 2 {
+			return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
+		}
+	}
+	return tableName
+}
+
 type DumpOptions struct {
 	MySQLHost             *MySQLHost
 	MySQLCredentials      *MySQLCredentials
@@ -29,6 +40,8 @@ type DumpOptions struct {
 	CompressLevel         int
 	IsolationLevel        sql.IsolationLevel
 	Consistent            bool
+	WhereConditions       map[string]string // table -> where condition
+	GlobalWhereCondition  string            // fallback for all tables
 	TemporalOptions       TemporalOptions
 }
 
@@ -46,6 +59,32 @@ type MySQLHost struct {
 type MySQLCredentials struct {
 	User     string
 	Password string
+}
+
+// GetDumpOptions creates and returns a new DumpOptions instance with default values
+func GetDumpOptions() *DumpOptions {
+	return &DumpOptions{
+		MySQLHost:             &MySQLHost{HostName: "localhost", Port: 3306},
+		MySQLCredentials:      &MySQLCredentials{},
+		Threads:               1,
+		ChunkSize:             1000,
+		OutputChunkSize:       0,
+		ChannelBufferSize:     1000,
+		LockTables:            true,
+		TablesWithoutUKOption: "error",
+		AddDropTable:          false,
+		GetMasterStatus:       true,
+		GetSlaveStatus:        false,
+		SkipUseDatabase:       false,
+		Compress:              false,
+		CompressLevel:         1,
+		IsolationLevel:        sql.LevelRepeatableRead,
+		Consistent:            true,
+		WhereConditions:       make(map[string]string),
+		TemporalOptions: TemporalOptions{
+			IsolationLevel: "REPEATABLE READ",
+		},
+	}
 }
 
 func ParseString(s interface{}) []byte {
@@ -298,6 +337,25 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 			}
 		case "consistent":
 			do.Consistent, errBool = strconv.ParseBool(section.Keys()[key].Value())
+		case "where":
+			// Parse table-specific WHERE conditions
+			whereValue := section.Keys()[key].Value()
+			if strings.Contains(whereValue, ":") {
+				// Table-specific: "table:condition,table2:condition2"
+				parts := strings.Split(whereValue, ",")
+				if do.WhereConditions == nil {
+					do.WhereConditions = make(map[string]string)
+				}
+				for _, part := range parts {
+					if tableCond := strings.SplitN(strings.TrimSpace(part), ":", 2); len(tableCond) == 2 {
+						normalizedTableName := normalizeTableName(tableCond[0])
+						do.WhereConditions[normalizedTableName] = tableCond[1]
+					}
+				}
+			} else {
+				// Global WHERE condition
+				do.GlobalWhereCondition = whereValue
+			}
 		case "tables":
 			do.TemporalOptions.Tables = section.Keys()[key].Value()
 		case "databases":

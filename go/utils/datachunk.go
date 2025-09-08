@@ -20,15 +20,36 @@ type DataChunk struct {
 
 // GetWhereSQL return the where condition for a chunk
 func (dc *DataChunk) GetWhereSQL() string {
+	baseWhere := ""
 	if dc.IsSingleChunk {
-		return ""
+		baseWhere = ""
+	} else if dc.IsLastChunk {
+		baseWhere = fmt.Sprintf(" WHERE %s >= ?", dc.Task.Table.GetPrimaryOrUniqueKey())
+	} else {
+		baseWhere = fmt.Sprintf(" WHERE %s BETWEEN ? AND ?", dc.Task.Table.GetPrimaryOrUniqueKey())
 	}
 
-	if dc.IsLastChunk {
-		return fmt.Sprintf(" WHERE %s >= ?", dc.Task.Table.GetPrimaryOrUniqueKey())
-	} else {
-		return fmt.Sprintf(" WHERE %s BETWEEN ? AND ?", dc.Task.Table.GetPrimaryOrUniqueKey())
+	// Append custom WHERE if provided
+	dumpOptions := dc.Task.TaskManager.DumpOptions
+	whereCondition := ""
+
+	// Check for table-specific WHERE condition first
+	tableName := dc.Task.Table.GetFullName()
+	if condition, exists := dumpOptions.WhereConditions[tableName]; exists {
+		whereCondition = condition
+	} else if dumpOptions.GlobalWhereCondition != "" {
+		// Fall back to global WHERE condition
+		whereCondition = dumpOptions.GlobalWhereCondition
 	}
+
+	if whereCondition != "" {
+		if baseWhere != "" {
+			baseWhere += " AND (" + whereCondition + ")"
+		} else {
+			baseWhere = " WHERE (" + whereCondition + ")"
+		}
+	}
+	return baseWhere
 }
 
 func (dc *DataChunk) GetOrderBYSQL() string {

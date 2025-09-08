@@ -41,8 +41,8 @@ func (t *Task) GetChunkSqlQuery() string {
 }
 
 func (t *Task) GetLastChunkSqlQuery() string {
-
 	keyForChunks := t.Table.GetPrimaryOrUniqueKey()
+
 	return fmt.Sprintf("SELECT %s FROM %s WHERE %s >= %d LIMIT 1",
 		keyForChunks, t.Table.GetFullName(), keyForChunks, t.chunkMin)
 }
