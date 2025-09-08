@@ -35,7 +35,8 @@ func NewTaskManager(
 		CompressLevel:          dumpOptions.CompressLevel,
 		IsolationLevel:         dumpOptions.IsolationLevel,
 		mySQLHost:              dumpOptions.MySQLHost,
-		mySQLCredentials:       dumpOptions.MySQLCredentials}
+		mySQLCredentials:       dumpOptions.MySQLCredentials,
+		DumpOptions:            dumpOptions}
 	return tm
 }
 
@@ -61,6 +62,7 @@ type TaskManager struct {
 	IsolationLevel         sql.IsolationLevel
 	mySQLHost              *MySQLHost
 	mySQLCredentials       *MySQLCredentials
+	DumpOptions            *DumpOptions
 }
 
 func (tm *TaskManager) addDatabaseEngine(t *Table) {

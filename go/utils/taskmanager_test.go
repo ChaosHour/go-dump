@@ -9,15 +9,15 @@ import (
 
 func getMySQLHost() *MySQLHost {
 	return &MySQLHost{
-		HostName: "localhost",
+		HostName: "127.0.0.1",
 		Port:     3306,
 	}
 }
 
 func getMySQLCredentials() *MySQLCredentials {
 	return &MySQLCredentials{
-		User:     "testuser",
-		Password: "simpletest",
+		User:     "root",
+		Password: "s3cr3t",
 	}
 }
 
@@ -41,6 +41,8 @@ func getDumpOptions() *DumpOptions {
 		CompressLevel:         0,
 		IsolationLevel:        sql.LevelRepeatableRead,
 		Consistent:            true,
+		WhereConditions:       make(map[string]string),
+		GlobalWhereCondition:  "",
 	}
 }
 
