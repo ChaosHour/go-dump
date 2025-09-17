@@ -1,4 +1,4 @@
-module github.com/martinarrieta/go-dump
+module github.com/ChaosHour/go-dump
 
 go 1.23.2
 
