@@ -392,6 +392,10 @@ func (tm *TaskManager) StartWorker(workerId int) {
 			break
 		}
 
+		if chunk.IsSingleChunk && workerId != 0 {
+			continue
+		}
+
 		if query != chunk.GetPrepareSQL() {
 			query = chunk.GetPrepareSQL()
 			if stmt != nil {
