@@ -1,6 +1,6 @@
 # go-dump
 
-[![Build Status](https://travis-ci.org/martinarrieta/go-dump.svg?branch=master)](https://travis-ci.org/martinarrieta/go-dump)
+[![Build Status](https://travis-ci.org/ChaosHour/go-dump.svg?branch=master)](https://travis-ci.org/ChaosHour/go-dump)
 
 **IMPORTANT!** The project is under development and there is a lot of work to do.
 
@@ -139,7 +139,7 @@ You can now use the `--where` flag to dump only specific rows that match a WHERE
 
 ## Download
 
-Each release includes pre-built binaries. You can check the [latest release on GitHub](https://github.com/martinarrieta/go-dump/releases) and download them.
+Each release includes pre-built binaries. You can check the [latest release on GitHub](https://github.com/ChaosHour/go-dump/releases) and download them.
 
 ## Examples
 

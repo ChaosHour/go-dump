@@ -14,7 +14,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/martinarrieta/go-dump/go/utils"
+	"github.com/ChaosHour/go-dump/go/utils"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/outbrain/golib/log"
