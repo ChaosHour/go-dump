@@ -94,7 +94,12 @@ func NewFileBuffer(fileName string, compress bool, compressLevel int) *Buffer {
 
 func NewChunkBuffer(c *DataChunk, workerId int) (*Buffer, error) {
 
-	filename := fmt.Sprintf("%s-thread%d.sql", c.Task.Table.GetUnescapedFullName(), workerId)
+	var filename string
+	if c.IsSingleChunk {
+		filename = fmt.Sprintf("%s.sql", c.Task.Table.GetUnescapedFullName())
+	} else {
+		filename = fmt.Sprintf("%s-thread%d.sql", c.Task.Table.GetUnescapedFullName(), workerId)
+	}
 	fullpath := filepath.Join(c.Task.TaskManager.DestinationDir, filename)
 
 	bufferOptions := c.Task.TaskManager.GetBufferOptions()
