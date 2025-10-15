@@ -6,13 +6,15 @@ import (
 	"strconv"
 	"strings"
 
+	"os"
+
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/outbrain/golib/log"
 	ini "gopkg.in/ini.v1"
 )
 
-// normalizeTableName converts a table name like "schema.table" to "`schema`.`table`"
-func normalizeTableName(tableName string) string {
+// NormalizeTableName converts a table name like "schema.table" to "`schema`.`table`"
+func NormalizeTableName(tableName string) string {
 	if strings.Contains(tableName, ".") {
 		parts := strings.Split(tableName, ".")
 		if len(parts) == 2 {
@@ -20,6 +22,25 @@ func normalizeTableName(tableName string) string {
 		}
 	}
 	return tableName
+}
+
+func getPasswordFromFile(iniFile string) string {
+	content, err := os.ReadFile(iniFile)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "mysql-password=") {
+			value := strings.TrimPrefix(line, "mysql-password=")
+			if strings.HasPrefix(value, "\"") && strings.HasSuffix(value, "\"") {
+				return value[1 : len(value)-1]
+			}
+			return value
+		}
+	}
+	return ""
 }
 
 type DumpOptions struct {
@@ -229,7 +250,7 @@ func GetMySQLConnection(host *MySQLHost, credentials *MySQLCredentials) (*sql.DB
 	} else {
 		hoststring = fmt.Sprintf("tcp(%s:%d)", host.HostName, host.Port)
 	}
-	log.Debugf(fmt.Sprintf("%s@%s/", userpass, hoststring))
+	// log.Debugf(fmt.Sprintf("%s@%s/", userpass, hoststring))
 	db, err := sql.Open("mysql", fmt.Sprintf("%s@%s/", userpass, hoststring))
 	if err != nil {
 		log.Fatalf("MySQL connection error: %s", err.Error())
@@ -251,11 +272,12 @@ func ParseIniFile(iniFile string, do *DumpOptions, flagSet map[string]bool) {
 	// Check the different sections in the ini file
 	for section := range cfg.Sections() {
 		cfg.Sections()[section].Name()
+		// log.Debugf("Parsing ini section: %s", cfg.Sections()[section].Name())
 		switch cfg.Sections()[section].Name() {
 		case "client", "mysqldump":
 			parseMySQLIniOptions(cfg.Sections()[section], do, flagSet)
 		case "go-dump":
-			parseIniOptions(cfg.Sections()[section], do, flagSet)
+			parseIniOptions(cfg.Sections()[section], do, flagSet, iniFile)
 		}
 	}
 }
@@ -271,7 +293,7 @@ func parseMySQLIniOptions(section *ini.Section, do *DumpOptions, flagSet map[str
 		case "user":
 			do.MySQLCredentials.User = section.Keys()[key].Value()
 		case "password":
-			do.MySQLCredentials.Password = section.Keys()[key].Value()
+			do.MySQLCredentials.Password = strings.Trim(section.Keys()[key].Value(), "\"")
 		case "host":
 			do.MySQLHost.HostName = section.Keys()[key].Value()
 		case "port":
@@ -287,7 +309,7 @@ func parseMySQLIniOptions(section *ini.Section, do *DumpOptions, flagSet map[str
 	}
 }
 
-func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]bool) {
+func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]bool, iniFile string) {
 	var errInt, errBool error
 	for key := range section.Keys() {
 		if flagSet[section.Keys()[key].Name()] {
@@ -297,16 +319,23 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 		switch section.Keys()[key].Name() {
 		case "mysql-user":
 			do.MySQLCredentials.User = section.Keys()[key].Value()
+			// log.Debugf("Parsed mysql-user from ini: '%s'", do.MySQLCredentials.User)
 		case "mysql-password":
-			do.MySQLCredentials.Password = section.Keys()[key].Value()
+			// rawValue := section.Keys()[key].Value()
+			// log.Debugf("Raw mysql-password from ini: '%s'", rawValue)
+			do.MySQLCredentials.Password = getPasswordFromFile(iniFile)
+			// log.Debugf("Parsed mysql-password from ini: '%s'", do.MySQLCredentials.Password)
 		case "mysql-host":
 			do.MySQLHost.HostName = section.Keys()[key].Value()
+			// log.Debugf("Parsed mysql-host from ini: '%s'", do.MySQLHost.HostName)
 		case "mysql-port":
 			if section.Keys()[key].Value() != "" {
 				do.MySQLHost.Port, errInt = strconv.Atoi(section.Keys()[key].Value())
+				// log.Debugf("Parsed mysql-port from ini: %d", do.MySQLHost.Port)
 			}
 		case "mysql-socket":
 			do.MySQLHost.SocketFile = section.Keys()[key].Value()
+			// log.Debugf("Parsed mysql-socket from ini: '%s'", do.MySQLHost.SocketFile)
 		case "threads":
 			if section.Keys()[key].Value() != "" {
 				do.Threads, errInt = strconv.Atoi(section.Keys()[key].Value())
@@ -348,7 +377,7 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 				}
 				for _, part := range parts {
 					if tableCond := strings.SplitN(strings.TrimSpace(part), ":", 2); len(tableCond) == 2 {
-						normalizedTableName := normalizeTableName(tableCond[0])
+						normalizedTableName := NormalizeTableName(tableCond[0])
 						do.WhereConditions[normalizedTableName] = tableCond[1]
 					}
 				}
