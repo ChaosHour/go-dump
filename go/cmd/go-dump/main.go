@@ -20,17 +20,6 @@ import (
 	"github.com/outbrain/golib/log"
 )
 
-// normalizeTableName converts a table name like "schema.table" to "`schema`.`table`"
-func normalizeTableName(tableName string) string {
-	if strings.Contains(tableName, ".") {
-		parts := strings.Split(tableName, ".")
-		if len(parts) == 2 {
-			return fmt.Sprintf("`%s`.`%s`", parts[0], parts[1])
-		}
-	}
-	return tableName
-}
-
 // WaitGroup for the creation of the chunks
 var wgCreateChunks sync.WaitGroup
 
@@ -146,7 +135,7 @@ func main() {
 			}
 			for _, part := range parts {
 				if tableCond := strings.SplitN(strings.TrimSpace(part), ":", 2); len(tableCond) == 2 {
-					normalizedTableName := normalizeTableName(tableCond[0])
+					normalizedTableName := utils.NormalizeTableName(tableCond[0])
 					dumpOptions.WhereConditions[normalizedTableName] = tableCond[1]
 				}
 			}
