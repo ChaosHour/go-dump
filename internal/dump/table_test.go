@@ -1,4 +1,4 @@
-package utils
+package dump
 
 import "testing"
 
@@ -43,8 +43,7 @@ func TestTable(t *testing.T) {
 			t.Fatalf("Table schema is %s and we expect %s.", tt.table.GetSchema(), tt.schema)
 		}
 		if tt.table.GetFullName() != tt.fullname {
-			t.Fatalf("Table fullname is %s and we expect %s.",
-				tt.table.GetFullName(), tt.fullname)
+			t.Fatalf("Table fullname is %s and we expect %s.", tt.table.GetFullName(), tt.fullname)
 		}
 		if tt.table.GetUnescapedFullName() != tt.unescapedfullname {
 			t.Fatalf("Table unescaped fullname is %s and we expect %s.",
@@ -55,5 +54,4 @@ func TestTable(t *testing.T) {
 				tt.table.GetPrimaryOrUniqueKey(), tt.pkOrUk)
 		}
 	}
-
 }
