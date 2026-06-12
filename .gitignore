@@ -4,7 +4,7 @@
 *.dll
 *.so
 *.dylib
-go-dump
+/go-dump
 bin/
 
 # Test binary, built with `go test -c`
@@ -36,3 +36,10 @@ Thumbs.db
 # Log files
 log/*
 *.log
+/go-load
+
+# Dump artifacts from manual test runs in the repo root
+/*.sql
+/*.sql.gz
+/metadata.json
+/checksums.txt

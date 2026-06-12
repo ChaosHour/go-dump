@@ -1,4 +1,4 @@
-package utils
+package dump
 
 import "testing"
 
@@ -10,16 +10,15 @@ type ChunksTest struct {
 }
 
 var chunksTests = []ChunksTest{
-
 	{task: &task1,
 		expectSingleChunkSQL: "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`city`",
-		expectLastChunkSQL:   "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`city` WHERE city_id >= ? ORDER BY city_id",
-		expectChunkSQL:       "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`city` WHERE city_id BETWEEN ? AND ? ORDER BY city_id"},
+		expectLastChunkSQL:   "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`city` WHERE `city_id` >= ? ORDER BY `city_id`",
+		expectChunkSQL:       "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`city` WHERE `city_id` BETWEEN ? AND ? ORDER BY `city_id`"},
 
 	{task: &task2,
 		expectSingleChunkSQL: "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`country`",
-		expectLastChunkSQL:   "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`country` WHERE country_id >= ? ORDER BY country_id",
-		expectChunkSQL:       "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`country` WHERE country_id BETWEEN ? AND ? ORDER BY country_id"},
+		expectLastChunkSQL:   "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`country` WHERE `country_id` >= ? ORDER BY `country_id`",
+		expectChunkSQL:       "SELECT /*!40001 SQL_NO_CACHE */ * FROM `sakila`.`country` WHERE `country_id` BETWEEN ? AND ? ORDER BY `country_id`"},
 }
 
 func TestNewSingleDataChunk(t *testing.T) {

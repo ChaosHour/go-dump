@@ -1,4 +1,4 @@
-package utils
+package dump
 
 import (
 	"database/sql"
@@ -22,7 +22,6 @@ func getMySQLCredentials() *MySQLCredentials {
 }
 
 func getDumpOptions() *DumpOptions {
-
 	return &DumpOptions{
 		MySQLHost:             getMySQLHost(),
 		MySQLCredentials:      getMySQLCredentials(),
@@ -50,13 +49,9 @@ var dumpOptions = getDumpOptions()
 
 var tmdb, _ = GetMySQLConnection(dumpOptions.MySQLHost, dumpOptions.MySQLCredentials)
 
-// Creating the buffer for the channel
 var cDataChunk = make(chan DataChunk, dumpOptions.ChannelBufferSize)
 
-// WaitGroup for the creation of the chunks
 var wgCreateChunks sync.WaitGroup
-
-// WaitGroup to process the chunks
 var wgProcessChunks sync.WaitGroup
 
 var taskManager = NewTaskManager(
@@ -66,7 +61,12 @@ var taskManager = NewTaskManager(
 	tmdb,
 	dumpOptions)
 
+// TestCreateTaskManager is an integration test requiring MySQL at 127.0.0.1:3306
+// with root/s3cr3t. Run with: go test ./internal/dump/ -run TestCreateTaskManager
 func TestCreateTaskManager(t *testing.T) {
+	if tmdb == nil {
+		t.Skip("MySQL not available at 127.0.0.1:3306 — skipping integration test")
+	}
 	if _, err := os.Stat(taskManager.DestinationDir); os.IsNotExist(err) {
 		os.MkdirAll(taskManager.DestinationDir, 0755)
 	}
