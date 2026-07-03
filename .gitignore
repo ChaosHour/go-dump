@@ -43,3 +43,7 @@ log/*
 /*.sql.gz
 /metadata.json
 /checksums.txt
+
+# Multi-version matrix test output and manual test dumps
+test/matrix-out/
+/test-seed/

@@ -34,6 +34,7 @@ func main() {
 		pattern    string
 		workers    int
 		dataOnly   bool
+		skipBinlog bool
 		verify     bool
 		resume     bool
 		quiet      bool
@@ -53,6 +54,7 @@ func main() {
 	flag.StringVar(&pattern, "pattern", "*.sql", "File glob pattern for data files in --directory. Use '*.sql.gz' for compressed dumps.")
 	flag.IntVar(&workers, "workers", 4, "Number of parallel workers for data files")
 	flag.BoolVar(&dataOnly, "data-only", false, "Skip schema (definition) files; load data files only")
+	flag.BoolVar(&skipBinlog, "skip-binlog", false, "Run SET SQL_LOG_BIN=0 on every load connection so the restore is not written to the target's binlog or replicated downstream. Requires SUPER or SYSTEM_VARIABLES_ADMIN.")
 	flag.BoolVar(&verify, "verify", false, "Verify checksums after loading (requires checksums.txt in --directory)")
 	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json")
 	flag.BoolVar(&quiet, "quiet", false, "Suppress INFO messages")
@@ -113,6 +115,11 @@ func main() {
 
 	imp := load.New(db, workers, dataOnly)
 	defer imp.Close()
+
+	if skipBinlog {
+		imp.SetSkipBinlog(true)
+		log.Warning("--skip-binlog: loaded data will NOT be written to the target's binlog — it will not replicate to any downstream replicas and adds nothing to gtid_executed.")
+	}
 
 	if directory != "" {
 		// Log useful context from the source dump's metadata if present.

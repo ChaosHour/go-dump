@@ -16,6 +16,8 @@ per thread with a consistent, point-in-time snapshot using InnoDB MVCC — simil
 - [Common examples](#common-examples)
 - [Output files](#output-files)
 - [Restoring](#restoring)
+- [Replication and GTIDs](#replication-and-gtids)
+- [Limitations](#limitations)
 - [Required privileges](#required-privileges)
 - [Cloud SQL notes](#cloud-sql-notes)
 
@@ -45,11 +47,16 @@ per thread with a consistent, point-in-time snapshot using InnoDB MVCC — simil
 
 | Version | Supported | Notes |
 |---------|-----------|-------|
-| MySQL 5.7 | ✅ | Full support |
-| MySQL 8.0.x | ✅ | Uses `SHOW MASTER STATUS` / `SHOW REPLICA STATUS` |
-| MySQL 8.4+ | ✅ | Uses `SHOW BINARY LOG STATUS` / `SHOW REPLICA STATUS` |
+| MySQL 5.7 | ✅ | Full support (matrix-tested on 5.7.44) |
+| MySQL 8.0.x | ✅ | Uses `SHOW MASTER STATUS` / `SHOW REPLICA STATUS` (matrix-tested on 8.0.45) |
+| MySQL 8.4 | ✅ | Uses `SHOW BINARY LOG STATUS` / `SHOW REPLICA STATUS` (matrix-tested on 8.4.10) |
+| MySQL 9.x | ✅ | Same as 8.4 (matrix-tested on 9.7.1) |
 | Google Cloud SQL MySQL 5.7 | ✅ | Direct TCP (private IP) |
 | Google Cloud SQL MySQL 8.0 | ✅ | Direct TCP (private IP) |
+
+Every version above is exercised by `make test-versions` (see [Building](#building)):
+GTID capture, full restore round trip with checksum verification, and
+`--skip-binlog` GTID invariance.
 
 Authentication: `mysql_native_password` (5.7) and `caching_sha2_password` (8.0+)
 are both handled automatically by the driver.
@@ -90,7 +97,19 @@ make test
 
 # Run integration tests (requires MySQL at 127.0.0.1:3306)
 make test-integration
+
+# Multi-version matrix: dump/restore/skip-binlog against MySQL 5.7, 8.0, 8.4, 9
+# Containers use ports 33057/33080/33084/33090 — safe alongside a local 3306.
+make test-versions-up      # start the four containers (first run pulls images)
+make test-versions         # build binaries + run test/test-versions.sh
+make test-versions-down    # tear down (removes volumes)
 ```
+
+The matrix (`test/docker-compose.versions.yml` + `test/test-versions.sh`)
+verifies, per version: GTID capture in `metadata.json`, a full
+drop-database→restore→checksum-verify round trip, and that
+`go-load --skip-binlog` leaves `gtid_executed` byte-identical.
+MySQL 5.7 runs under amd64 emulation on Apple Silicon (Rosetta).
 
 The `VERSION` file controls the embedded version string. Override at build time:
 
@@ -545,6 +564,279 @@ ls /backups/myapp/*.sql.gz | xargs -P4 -I{} sh -c 'zcat {} | mysql -h target-hos
 
 For point-in-time recovery, apply binary logs from the position recorded in
 `master-data.sql` (or `metadata.json` `binlog_file`/`binlog_position`).
+
+---
+
+## Replication and GTIDs
+
+go-dump captures the executed GTID set (and binlog file/position) **inside the lock
+window**, at the exact instant the worker snapshots are opened — so the recorded
+coordinates match the dumped data. This is what makes a dump usable for seeding a
+replica.
+
+Two distinct workflows:
+
+| Goal | How |
+|------|-----|
+| Seed a new replica and start replication | Dump **with** `--get-master-status`, restore, then set `gtid_purged` and configure replication (manual SQL today — see below) |
+| Repopulate tables/databases without touching replication | Dump **without** `--get-master-status` (the default) and just restore |
+
+### Dumping with GTIDs (replica seeding)
+
+```bash
+# On (or against) the primary:
+go-dump \
+  --ini-file /etc/go-dump/primary.ini \
+  --databases myapp \
+  --destination /backups/seed \
+  --threads 8 \
+  --get-master-status \
+  --checksum \
+  --execute
+```
+
+This records in `/backups/seed/metadata.json`:
+
+```json
+"binlog_file": "binlog.000042",
+"binlog_position": 1421,
+"gtid_set": "3e11fa47-71ca-11e1-9e33-c80aa9429562:1-123"
+```
+
+and the same values in human-readable form in `master-data.sql` (a text report,
+not executable SQL — go-load skips it automatically).
+
+Restore onto the new replica, then configure replication:
+
+```bash
+# 1. Load the data (go-load prints the recorded binlog/GTID coordinates).
+#    --skip-binlog keeps the load out of the replica's own binlog/GTID history,
+#    so gtid_purged can be set afterwards without RESET MASTER.
+go-load --host replica1 --user root --password ... \
+  --directory /backups/seed --workers 8 --verify --skip-binlog
+```
+
+```sql
+-- 2. On the replica: set gtid_purged to the dump's snapshot GTID set
+--    (from metadata.json "gtid_set").
+--    gtid_purged can only be set while gtid_executed is empty. With
+--    --skip-binlog above (and a fresh instance), it already is. If the load
+--    ran WITHOUT --skip-binlog, clear the local GTID history first:
+--      RESET MASTER;                   -- MySQL <= 8.0 / 5.7
+--      RESET BINARY LOGS AND GTIDS;    -- MySQL 8.4+
+--    (destructive: wipes the replica's own binlogs — never run on the primary)
+SET GLOBAL gtid_purged = '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-123';
+
+-- 3. Point the replica at the primary using auto-positioning.
+CHANGE REPLICATION SOURCE TO
+  SOURCE_HOST = 'primary1.db.internal',
+  SOURCE_PORT = 3306,
+  SOURCE_USER = 'repl',
+  SOURCE_PASSWORD = '...',
+  SOURCE_AUTO_POSITION = 1;         -- MySQL 8.0.23+; use CHANGE MASTER TO / MASTER_AUTO_POSITION=1 on 5.7
+START REPLICA;                      -- START SLAVE on 5.7
+
+-- 4. Verify
+SHOW REPLICA STATUS\G               -- Replica_IO_Running / Replica_SQL_Running: Yes
+```
+
+Then prove the seed is clean with go-gtids — see the step-through guide below.
+
+### Verifying a replica with go-gtids (errant transaction check)
+
+[go-gtids](https://github.com/ChaosHour/go-gtids) is a companion tool that
+compares `gtid_executed` between two servers and reports **errant
+transactions** — GTIDs the replica has that its primary does not.
+
+**Why it matters:** an errant transaction means someone (or something) wrote
+directly to the replica. The replica's data has silently diverged from the
+primary, and the damage surfaces later at the worst time: if that replica is
+promoted during a failover, other replicas request its errant GTIDs from their
+new source, and either fail with error 1236 (`master has purged binary logs`)
+or — worse — apply changes the rest of the topology never had. Catching errant
+GTIDs while the topology is healthy is cheap; catching them mid-failover is an
+outage.
+
+**When to run it:**
+
+- **After seeding a replica** with go-dump/go-load (step 4 of the recipe
+  above) — proves the seed + `gtid_purged` handoff left nothing extra behind.
+- **Before any planned failover or promotion** — a clean check means
+  auto-positioning will work on every replica.
+- **Periodically / after incidents** — e.g. after someone had a root shell on
+  a replica, or after a load was run against the "wrong" host.
+- **After `go-load` into a live topology** — confirm the load landed where you
+  intended and nothing leaked onto a replica.
+
+**Step-through:**
+
+```bash
+# 1. Install (or download a release binary from the repo)
+go install github.com/ChaosHour/go-gtids/cmd/go-gtids@latest
+
+# 2. Credentials: go-gtids reads user/password from ~/.my.cnf
+cat ~/.my.cnf
+# [client]
+# user=root
+# password=s3cr3t
+
+# 3. Run it: -s is the primary (source), -t the replica (target)
+go-gtids -s primary1.db.internal -source-port 3306 -t replica1 -target-port 3306
+```
+
+Healthy output — each server's identity and GTID history, then the verdict:
+
+```
+[+] Source -> primary1 gtid_executed: 2ac8ec13-...:1-40593, ...
+[+] server_uuid: 2ac8ec13-...
+[+] Target -> replica1 gtid_executed: 2ac8ec13-...:1-40593, ...
+[+] server_uuid: 2af7e535-...
+[+] No Errant Transactions:
+```
+
+```bash
+# 4. If errant GTIDs ARE reported, remediate with the fix flags:
+#    -fix          inject empty transactions for the errant GTIDs on the SOURCE,
+#                  so the replica's history becomes a subset again (most common;
+#                  keeps auto-position failover working; the divergent DATA on
+#                  the replica still needs to be reconciled by you)
+#    -fix-replica  apply to the replica instead
+go-gtids -s primary1.db.internal -t replica1 -fix
+```
+
+> **Reading the output:** compare each server's `server_uuid` against the UUIDs
+> in the GTID sets. A range under the *replica's own* `server_uuid` that the
+> primary lacks = direct writes on the replica. The fix flags repair the **GTID
+> bookkeeping** (empty transactions make the sets consistent) — they do not and
+> cannot un-write the divergent rows. For data reconciliation, re-seed the
+> replica with go-dump/go-load, or use pt-table-checksum/pt-table-sync.
+
+Equivalent manual check, if you only have a mysql client:
+
+```sql
+-- On the replica: anything the replica executed that the primary didn't?
+SELECT GTID_SUBTRACT(@@global.gtid_executed, '<primary gtid_executed>');
+-- '' (empty) = clean; anything else = errant GTIDs
+```
+
+To prevent errant transactions in the first place, set
+`super_read_only = ON` on replicas (blocks even SUPER users; the replication
+applier is exempt), and use `go-load --skip-binlog` when a replica must be
+written to deliberately (it keeps the write out of the GTID history — though
+the data divergence is then yours to manage).
+
+For non-GTID (file/position) replication, use `binlog_file` / `binlog_position`
+from `metadata.json` instead:
+
+```sql
+CHANGE REPLICATION SOURCE TO
+  SOURCE_HOST = 'primary1.db.internal',
+  SOURCE_LOG_FILE = 'binlog.000042',
+  SOURCE_LOG_POS = 1421, ...;
+```
+
+> **Operational notes:**
+> - `RESET MASTER` is destructive on the replica (wipes its binlogs and GTID
+>   history). Only run it on the freshly-seeded replica, never on the primary.
+> - `SET GLOBAL gtid_purged` requires `SUPER` / `SYSTEM_VARIABLES_ADMIN`, which
+>   managed services (Cloud SQL, RDS) do not grant — use the provider's external
+>   replication API there instead.
+> - These post-restore steps are manual today. Automating them in go-load is
+>   planned — see [docs/GTID-REPLICATION.md](docs/GTID-REPLICATION.md).
+
+### Dumping without GTIDs (repopulating tables, replication-safe)
+
+This is the **default behaviour** — GTID/binlog capture is opt-in:
+
+```bash
+# No --get-master-status: no GTID or binlog state is recorded anywhere.
+go-dump \
+  --ini-file /etc/go-dump/prod.ini \
+  --tables "myapp.orders,myapp.order_items" \
+  --destination /backups/orders \
+  --threads 4 \
+  --add-drop-table \
+  --execute
+
+# Restore into an existing server without touching its replication state:
+go-load --host target-host --user app_admin --password ... \
+  --directory /backups/orders --workers 4
+```
+
+This is safe for replication because, unlike `mysqldump` (which embeds
+`SET @@GLOBAL.GTID_PURGED` by default when `gtid_mode=ON`), go-dump data files
+contain **only** `USE`, `SET NAMES`, `FOREIGN_KEY_CHECKS=0`, and `INSERT`
+statements. Restoring a go-dump can never overwrite the target's GTID state,
+stop its replication threads, or change its replication configuration —
+regardless of whether the dump was taken with `--get-master-status`.
+
+Two things to be aware of when loading into a live topology:
+
+- The load's writes go through the target's binlog like any other client
+  traffic. If the target is a **primary**, the restored rows replicate to its
+  replicas normally (usually what you want when repopulating a table). To load
+  **without** replicating downstream, use `go-load --skip-binlog` (below).
+- If the target is a **replica**, writing to it directly will make it diverge
+  from its primary (errant GTIDs). That is true of any client write, not
+  specific to go-dump — `--skip-binlog` avoids the errant GTIDs, but the data
+  divergence remains yours to manage.
+
+### Loading without writing the binlog (`--skip-binlog`)
+
+`go-load --skip-binlog` runs `SET SQL_LOG_BIN=0` on **every** connection the
+load uses (session-scoped, so it is applied per-connection, schema and data
+alike). The restored rows are written to the target only: nothing goes to its
+binlog, nothing replicates to its replicas, and nothing is added to its
+`gtid_executed`.
+
+```bash
+# Repopulate a table on a primary WITHOUT pushing the load to its replicas:
+go-load --host primary1 --user admin --password ... \
+  --directory /backups/orders --workers 4 --skip-binlog
+```
+
+Notes:
+
+- Requires `SUPER` or `SYSTEM_VARIABLES_ADMIN` on the target. Cloud SQL and RDS
+  do not grant these — go-load fails with a clear error there; drop the flag.
+- If the connection cannot disable binary logging, the load **aborts** rather
+  than continuing with a partially-logged restore.
+- When seeding a replica, loading with `--skip-binlog` keeps `gtid_executed`
+  empty on the fresh instance, which means `SET GLOBAL gtid_purged` works
+  without the destructive `RESET MASTER` step.
+
+---
+
+## Limitations
+
+Know these before relying on a dump for replica seeding or disaster recovery:
+
+- **Base tables only.** go-dump discovers `TABLE_TYPE = 'BASE TABLE'` — it does
+  **not** dump views, triggers, stored procedures/functions, or events. If your
+  schema uses them, capture them separately and load them after the data:
+
+  ```bash
+  mysqldump --no-data --no-create-info --routines --events --triggers \
+    -h source-host -u backup -p myapp > myapp-objects.sql
+  ```
+
+  A replica seeded without its views/routines will error on reads that use
+  them, even though replication itself runs fine.
+- **Users and grants are not dumped** unless `--all-databases
+  --include-system-databases` is used (raw `mysql.*` tables, on-prem only —
+  never against Cloud SQL/RDS). For portable account DDL, use
+  `pt-show-grants` or `mysqlpump --users` separately.
+- **Character sets:** dump files carry raw column bytes and are loaded on
+  default-charset (utf8mb4) connections. This round-trips utf8mb4/ascii/binary
+  columns correctly; schemas storing non-UTF-8 bytes in text columns (e.g.
+  latin1 with high-bit characters) should be test-restored and checksum-verified
+  before you rely on the dump.
+- **Non-InnoDB tables** are only write-protected during the brief lock window;
+  concurrent writes after the unlock can appear in their dump files (warned at
+  runtime).
+- **`CHECKSUM TABLE` runs after the locks are released** — on a live primary a
+  checksum mismatch does not necessarily mean a bad dump (see the caveat in
+  [Output files](#output-files)).
 
 ---
 

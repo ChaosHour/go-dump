@@ -1,0 +1,80 @@
+# Multi-version MySQL matrix for go-dump/go-load integration testing.
+#
+# Ports are deliberately non-standard so this stack can run alongside an
+# existing local MySQL (3306/3307):
+#   5.7  → 127.0.0.1:33057
+#   8.0  → 127.0.0.1:33080
+#   8.4  → 127.0.0.1:33084
+#   9    → 127.0.0.1:33090
+#
+# All servers run with gtid_mode=ON so --get-master-status captures a GTID set.
+#
+# Usage:
+#   make test-versions-up     # start all four (first run pulls images)
+#   make test-versions        # run the matrix test script
+#   make test-versions-down   # stop and remove (volumes included)
+#
+# Note: mysql:5.7 has no arm64 image — platform: linux/amd64 makes it run
+# under emulation on Apple Silicon (Rosetta must be enabled in Docker Desktop).
+
+x-mysql-env: &mysql-env
+  MYSQL_ROOT_PASSWORD: s3cr3t
+
+x-healthcheck: &mysql-health
+  test: ["CMD", "mysqladmin", "ping", "-uroot", "-ps3cr3t", "--silent"]
+  interval: 2s
+  timeout: 5s
+  retries: 60
+
+services:
+  mysql57:
+    image: mysql:5.7
+    platform: linux/amd64
+    container_name: godump-mysql57
+    environment: *mysql-env
+    ports:
+      - "127.0.0.1:33057:3306"
+    command:
+      - --server-id=57
+      - --log-bin=binlog
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_general_ci
+    healthcheck: *mysql-health
+
+  mysql80:
+    image: mysql:8.0
+    container_name: godump-mysql80
+    environment: *mysql-env
+    ports:
+      - "127.0.0.1:33080:3306"
+    command:
+      - --server-id=80
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    healthcheck: *mysql-health
+
+  mysql84:
+    image: mysql:8.4
+    container_name: godump-mysql84
+    environment: *mysql-env
+    ports:
+      - "127.0.0.1:33084:3306"
+    command:
+      - --server-id=84
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    healthcheck: *mysql-health
+
+  mysql9:
+    image: mysql:9
+    container_name: godump-mysql9
+    environment: *mysql-env
+    ports:
+      - "127.0.0.1:33090:3306"
+    command:
+      - --server-id=90
+      - --gtid-mode=ON
+      - --enforce-gtid-consistency=ON
+    healthcheck: *mysql-health

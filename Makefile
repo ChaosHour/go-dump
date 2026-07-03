@@ -113,15 +113,30 @@ build-all: build-linux build-linux-arm64 build-darwin build-darwin-arm64 \
 
 # ── Test ───────────────────────────────────────────────────────────────────────
 
-# Unit tests only — no MySQL connection required
+# Unit tests only — no MySQL connection required.
+# dump: whitelist (the package mixes in tests that need a live server);
+# load: all tests are MySQL-free (fake driver), run unfiltered.
 test-unit:
 	@echo "Running unit tests..."
 	$(GOTEST) -v ./internal/dump/ $(UNIT_TEST_FLAGS)
+	$(GOTEST) -v ./internal/load/
 
 # Integration tests — require a live MySQL instance (see test/test.ini)
 test-integration:
 	@echo "Running integration tests (requires MySQL)..."
-	$(GOTEST) -v -timeout 60s ./internal/dump/
+	$(GOTEST) -v -timeout 60s ./internal/dump/ ./internal/load/
+
+# ── Multi-version MySQL matrix (5.7 / 8.0 / 8.4 / 9) ──────────────────────────
+# Containers listen on 33057/33080/33084/33090 — safe alongside a local 3306.
+
+test-versions-up:
+	docker compose -f test/docker-compose.versions.yml up -d --wait
+
+test-versions: build build-go-load
+	./test/test-versions.sh
+
+test-versions-down:
+	docker compose -f test/docker-compose.versions.yml down -v
 
 # Alias: same as test-unit by default
 test: test-unit
