@@ -263,8 +263,8 @@ func execStream(ctx context.Context, conn *sql.Conn, r io.Reader) error {
 // parseStatements reads SQL from r and calls cb for each complete statement.
 // The scanner understands enough MySQL syntax that semicolons inside other
 // constructs never split a statement:
-//   - single- and double-quoted strings, with both \' and '' escaping
-//   - backtick-quoted identifiers ('' doubling, no backslash escapes)
+//   - single- and double-quoted strings, with both \' and ” escaping
+//   - backtick-quoted identifiers (” doubling, no backslash escapes)
 //   - line comments ("-- " per MySQL — the dashes must be followed by
 //     whitespace — and "#") and /* block comments */
 //
@@ -453,8 +453,10 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 				continue
 			}
 			// master-data.sql / slave-data.sql hold replication coordinates as
-			// plain text for the operator — they are not loadable SQL.
-			if strings.HasPrefix(base, "master-data.") || strings.HasPrefix(base, "slave-data.") {
+			// plain text for the operator, and change-replication-source.sql is
+			// an operator-edited template — none are loadable during restore.
+			if strings.HasPrefix(base, "master-data.") || strings.HasPrefix(base, "slave-data.") ||
+				strings.HasPrefix(base, "change-replication-source.") {
 				continue
 			}
 			seen[p] = true

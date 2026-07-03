@@ -10,6 +10,13 @@
 #   4. asserts the row count survived the round trip
 #   5. truncates, reloads with --skip-binlog, and asserts gtid_executed is
 #      byte-identical (the load left no trace in the binlog/GTID history)
+#   6. asserts change-replication-source.sql was written with auto-position
+#      and the captured coordinates
+#   7. asserts --set-gtid-purged REFUSES while the target has transactions
+#      beyond the dump set (errant gate)
+#   8. resets the server's GTID history (version-gated RESET), reloads with
+#      --skip-binlog --set-gtid-purged, and asserts gtid_executed now equals
+#      the dump's snapshot set (go-load verifies equality internally)
 #
 # Usage: ./test/test-versions.sh [version ...]   (default: 57 80 84 9)
 
@@ -113,8 +120,43 @@ run_version() {
   [[ "$rows_after" == "$rows_before" ]] \
     || { echo "   FAIL: rows $rows_before -> $rows_after after skip-binlog reload"; return 1; }
 
+  # 4. change-replication-source.sql template written with the coordinates
+  local tmpl="$dest/change-replication-source.sql"
+  [[ -f "$tmpl" ]] || { echo "   FAIL: $tmpl not written"; return 1; }
+  grep -q "SOURCE_AUTO_POSITION = 1" "$tmpl" \
+    || { echo "   FAIL: template lacks SOURCE_AUTO_POSITION"; return 1; }
+  grep -q "SET GLOBAL gtid_purged" "$tmpl" \
+    || { echo "   FAIL: template lacks gtid_purged"; return 1; }
+
+  # 5. --set-gtid-purged must REFUSE while gtid_executed exceeds the dump set
+  #    (all the binlogged seed/drop/restore activity above is "beyond" it).
+  msql "$v" "TRUNCATE TABLE matrix.items;"
+  if $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
+      --directory "$dest" --workers 2 --data-only --set-gtid-purged --force --quiet 2>"$dest/refusal.log"; then
+    echo "   FAIL: --set-gtid-purged did not refuse a target with extra GTIDs"; return 1
+  fi
+  grep -q "beyond the dump" "$dest/refusal.log" \
+    || { echo "   FAIL: refusal did not name errant transactions:"; cat "$dest/refusal.log"; return 1; }
+
+  # 6. Reset GTID history, then the real seeding path:
+  #    --skip-binlog + --set-gtid-purged on an empty-gtid_executed server.
+  local reset="RESET MASTER"
+  case "$v" in 84|9) reset="RESET BINARY LOGS AND GTIDS" ;; esac
+  msql "$v" "$reset;"
+  msql "$v" "SET SESSION sql_log_bin=0; TRUNCATE TABLE matrix.items;"
+  $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
+    --directory "$dest" --workers 2 --data-only --skip-binlog --set-gtid-purged --quiet
+
+  local executed
+  executed=$(msql "$v" "SELECT @@global.gtid_executed;")
+  [[ -n "$executed" ]] \
+    || { echo "   FAIL: gtid_executed empty after --set-gtid-purged"; return 1; }
+  rows_after=$(msql "$v" "SELECT COUNT(*) FROM matrix.items;")
+  [[ "$rows_after" == "$rows_before" ]] \
+    || { echo "   FAIL: rows $rows_before -> $rows_after after seeding load"; return 1; }
+
   msql "$v" "DROP DATABASE matrix;"
-  echo "   PASS: dump+gtid, restore+verify, skip-binlog ($rows_before rows)"
+  echo "   PASS: dump+gtid, restore+verify, skip-binlog, template, set-gtid-purged ($rows_before rows)"
 }
 
 [[ -x $GODUMP && -x $GOLOAD ]] || { echo "Build first: make build && make build-go-load"; exit 1; }

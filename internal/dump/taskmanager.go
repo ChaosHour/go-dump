@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -73,7 +74,7 @@ type TaskManager struct {
 	mySQLCredentials       *MySQLCredentials
 	DumpOptions            *DumpOptions
 	ctx                    context.Context
-	mysqlVersion           [3]int // [major, minor, patch], populated by detectMySQLVersion
+	mysqlVersion           [3]int        // [major, minor, patch], populated by detectMySQLVersion
 	metadata               *DumpMetadata // set via SetMetadata before workers start; nil in dry-run
 
 	// Binlog info captured by getMasterData, written to metadata.
@@ -423,6 +424,69 @@ func (tm *TaskManager) getMasterData() {
 	if err := buffer.Close(); err != nil {
 		log.Fatalf("Error finalising master-data file: %v", err)
 	}
+
+	tm.writeChangeSourceTemplate()
+}
+
+// writeChangeSourceTemplate writes change-replication-source.sql: a
+// ready-to-edit script for pointing a replica seeded from this dump at the
+// dumped server. The captured coordinates are filled in; the operator edits
+// the connection values. Always written uncompressed — it is for humans, and
+// go-load skips it during restore.
+func (tm *TaskManager) writeChangeSourceTemplate() {
+	path := filepath.Join(tm.DestinationDir, "change-replication-source.sql")
+	var b bytes.Buffer
+
+	fmt.Fprintf(&b, "-- go-dump replication setup template\n")
+	fmt.Fprintf(&b, "-- Source: %s (MySQL %s), coordinates captured inside the lock window:\n",
+		tm.mySQLHost.HostName, tm.MySQLVersion())
+	fmt.Fprintf(&b, "--   Binlog file/position: %s:%d\n", tm.BinlogFile, tm.BinlogPosition)
+	if tm.GTIDSet != "" {
+		fmt.Fprintf(&b, "--   Executed GTID set:    %s\n", strings.ReplaceAll(tm.GTIDSet, "\n", ""))
+	}
+	fmt.Fprintf(&b, "--\n")
+	fmt.Fprintf(&b, "-- EDIT the SOURCE_USER / SOURCE_PASSWORD (and host if the replica reaches\n")
+	fmt.Fprintf(&b, "-- the source by another address), then run on the freshly-seeded replica.\n")
+	fmt.Fprintf(&b, "-- go-load does NOT execute this file.\n")
+
+	if tm.GTIDSet != "" {
+		fmt.Fprintf(&b, "--\n")
+		fmt.Fprintf(&b, "-- ── GTID auto-position (recommended; MySQL 8.0.23+ syntax) ──\n")
+		fmt.Fprintf(&b, "-- Prerequisite: gtid_executed must be EMPTY on the replica. Seed with\n")
+		fmt.Fprintf(&b, "-- go-load --skip-binlog (or --set-gtid-purged, which runs the SET below\n")
+		fmt.Fprintf(&b, "-- for you), otherwise run RESET MASTER (8.4+: RESET BINARY LOGS AND GTIDS) first.\n")
+		fmt.Fprintf(&b, "SET GLOBAL gtid_purged = '%s';\n", strings.ReplaceAll(tm.GTIDSet, "\n", ""))
+		fmt.Fprintf(&b, "CHANGE REPLICATION SOURCE TO\n")
+		fmt.Fprintf(&b, "  SOURCE_HOST = '%s',\n", tm.mySQLHost.HostName)
+		fmt.Fprintf(&b, "  SOURCE_PORT = %d,\n", tm.mySQLHost.Port)
+		fmt.Fprintf(&b, "  SOURCE_USER = '<repl_user>',\n")
+		fmt.Fprintf(&b, "  SOURCE_PASSWORD = '<repl_password>',\n")
+		fmt.Fprintf(&b, "  SOURCE_AUTO_POSITION = 1;\n")
+		fmt.Fprintf(&b, "START REPLICA;\n")
+		fmt.Fprintf(&b, "--\n")
+		fmt.Fprintf(&b, "-- ── MySQL 5.7 equivalent ──\n")
+		fmt.Fprintf(&b, "-- SET GLOBAL gtid_purged = '%s';\n", strings.ReplaceAll(tm.GTIDSet, "\n", ""))
+		fmt.Fprintf(&b, "-- CHANGE MASTER TO MASTER_HOST='%s', MASTER_PORT=%d,\n", tm.mySQLHost.HostName, tm.mySQLHost.Port)
+		fmt.Fprintf(&b, "--   MASTER_USER='<repl_user>', MASTER_PASSWORD='<repl_password>',\n")
+		fmt.Fprintf(&b, "--   MASTER_AUTO_POSITION=1;\n")
+		fmt.Fprintf(&b, "-- START SLAVE;\n")
+	}
+
+	fmt.Fprintf(&b, "--\n")
+	fmt.Fprintf(&b, "-- ── File/position alternative (gtid_mode=OFF topologies) ──\n")
+	fmt.Fprintf(&b, "-- CHANGE REPLICATION SOURCE TO\n")
+	fmt.Fprintf(&b, "--   SOURCE_HOST = '%s',\n", tm.mySQLHost.HostName)
+	fmt.Fprintf(&b, "--   SOURCE_PORT = %d,\n", tm.mySQLHost.Port)
+	fmt.Fprintf(&b, "--   SOURCE_USER = '<repl_user>',\n")
+	fmt.Fprintf(&b, "--   SOURCE_PASSWORD = '<repl_password>',\n")
+	fmt.Fprintf(&b, "--   SOURCE_LOG_FILE = '%s',\n", tm.BinlogFile)
+	fmt.Fprintf(&b, "--   SOURCE_LOG_POS = %d;\n", tm.BinlogPosition)
+	fmt.Fprintf(&b, "-- START REPLICA;\n")
+
+	if err := os.WriteFile(path, b.Bytes(), 0644); err != nil {
+		log.Fatalf("Error writing %s: %v", path, err)
+	}
+	log.Infof("Replication setup template written → %s", path)
 }
 
 func (tm *TaskManager) WriteTablesSQL(addDropTable bool) {

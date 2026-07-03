@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -26,6 +27,11 @@ type stmtRecorder struct {
 	stmts  []string
 	failOn string // statement prefix to fail
 	err    error  // error returned for failOn matches
+
+	// queryFn, when set, answers SELECT/SHOW queries: it returns column names
+	// and row values for a given query. Lets tests script server state
+	// (gtid_mode, gtid_executed, replica status) without a MySQL server.
+	queryFn func(q string) (cols []string, rows [][]driver.Value, err error)
 }
 
 func (r *stmtRecorder) record(q string) error {
@@ -64,6 +70,38 @@ func (c *fakeConn) ExecContext(_ context.Context, query string, _ []driver.Named
 		return nil, err
 	}
 	return driver.ResultNoRows, nil
+}
+
+// QueryContext answers queries via the recorder's queryFn.
+func (c *fakeConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if err := c.rec.record(query); err != nil {
+		return nil, err
+	}
+	if c.rec.queryFn == nil {
+		return nil, fmt.Errorf("no queryFn configured for query %q", query)
+	}
+	cols, rows, err := c.rec.queryFn(query)
+	if err != nil {
+		return nil, err
+	}
+	return &fakeRows{cols: cols, rows: rows}, nil
+}
+
+type fakeRows struct {
+	cols []string
+	rows [][]driver.Value
+	i    int
+}
+
+func (r *fakeRows) Columns() []string { return r.cols }
+func (r *fakeRows) Close() error      { return nil }
+func (r *fakeRows) Next(dest []driver.Value) error {
+	if r.i >= len(r.rows) {
+		return io.EOF
+	}
+	copy(dest, r.rows[r.i])
+	r.i++
+	return nil
 }
 
 type fakeStmt struct {
