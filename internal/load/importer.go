@@ -32,11 +32,19 @@ type Importer struct {
 	db         *sql.DB
 	workers    int
 	skipSchema bool
+	skipBinlog bool
 }
 
 // New creates an Importer. Call Close() when done.
 func New(db *sql.DB, workers int, skipSchema bool) *Importer {
 	return &Importer{db: db, workers: workers, skipSchema: skipSchema}
+}
+
+// SetSkipBinlog makes every load connection run SET SQL_LOG_BIN=0, so the
+// restore is written to the target only — not to its binlog, its replicas, or
+// its GTID history. Requires SUPER or SYSTEM_VARIABLES_ADMIN on the target.
+func (imp *Importer) SetSkipBinlog(v bool) {
+	imp.skipBinlog = v
 }
 
 // Close releases the underlying database connection pool.
@@ -221,6 +229,20 @@ func (imp *Importer) doLoadFile(ctx context.Context, path string) error {
 	} {
 		if _, err := conn.ExecContext(ctx, set); err != nil {
 			return fmt.Errorf("%s: %w", set, err)
+		}
+	}
+
+	// SQL_LOG_BIN is session-scoped, so it must be set on every connection the
+	// load uses — a connection that misses it would silently replicate its
+	// files downstream. Fail hard rather than degrade to a partially-logged load.
+	if imp.skipBinlog {
+		if _, err := conn.ExecContext(ctx, "SET SQL_LOG_BIN=0"); err != nil {
+			var me *mysql.MySQLError
+			if errors.As(err, &me) && me.Number == 1227 {
+				return fmt.Errorf("SET SQL_LOG_BIN=0 requires SUPER or SYSTEM_VARIABLES_ADMIN "+
+					"(not granted on Cloud SQL/RDS — drop --skip-binlog there): %w", err)
+			}
+			return fmt.Errorf("SET SQL_LOG_BIN=0: %w", err)
 		}
 	}
 
