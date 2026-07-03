@@ -26,50 +26,51 @@ to make replica seeding a one-command operation.
   `SET @@GLOBAL.GTID_PURGED`, no `CHANGE MASTER`. Restores are replication-safe
   by construction — the mysqldump `gtid_purged` footgun does not exist here.
 
-### Load side — partial
+### Load side — nearly complete
 
 - `go-load` reads `metadata.json` and **logs** the source binlog/GTID
   coordinates (`cmd/go-load/main.go`).
-- `master-data.*` / `slave-data.*` are correctly excluded from loadable files
-  (`internal/load/importer.go`, `findFiles`).
+- `master-data.*` / `slave-data.*` / `change-replication-source.*` are
+  correctly excluded from loadable files (`internal/load/importer.go`,
+  `findFiles`).
 - `go-load --skip-binlog` runs `SET SQL_LOG_BIN=0` on every load connection
   (`internal/load/importer.go`, `doLoadFile`) — loads without replicating
   downstream or touching `gtid_executed`. Aborts (rather than degrading) if the
   privilege is missing, with a Cloud SQL/RDS hint on error 1227.
-- Everything after the data load (`gtid_purged`,
-  `CHANGE REPLICATION SOURCE TO`, `START REPLICA`) is **manual** — documented in
-  README "Replication and GTIDs".
+- `go-load --set-gtid-purged` applies the dump's GTID set to the target after
+  the load, with errant-transaction and running-replica guards
+  (`internal/load/gtid.go`) — see item 1 below.
+- Only `CHANGE REPLICATION SOURCE TO` + `START REPLICA` remain manual, and the
+  dump ships a filled-in template (`change-replication-source.sql`) for them.
 
 ## Gaps / planned features
 
-### 1. `go-load --set-gtid-purged` (highest value)
+### 1. `go-load --set-gtid-purged` — ✅ DONE (2026-07-03)
 
-Automate the GTID handoff after a seed restore.
+Implemented in `internal/load/gtid.go` (`ApplyGTIDPurged`), wired to run after
+a successful directory load (and after `--verify`). Behaviour:
 
-- Read `gtid_set` from `metadata.json` (fail with a clear error if empty or the
-  dump was taken without `--get-master-status`).
-- Execute, in order, on a single connection:
-  1. `RESET MASTER` (MySQL ≤ 8.0 / 5.7) or `RESET BINARY LOGS AND GTIDS`
-     (8.4+) — version-detect the same way `taskmanager.go` does
-     (`mysqlAtLeast`).
-  2. `SET GLOBAL gtid_purged = '<set>'`.
-- Safety requirements:
-  - Refuse to run if `SHOW REPLICA STATUS` returns rows with running threads
-    (target is already a replica) unless `--force`.
-  - Errant-transaction gate: before touching GTID state, verify the target's
-    `gtid_executed` is a subset of the dump's `gtid_set`
-    (`GTID_SUBTRACT(target, dump) = ''`). This is the same check
-    [go-gtids](https://github.com/ChaosHour/go-gtids) performs between two
-    live servers — reuse its logic (see `pkg/gtids` in that repo). Keep the
-    fix/remediation out of go-load: on failure, refuse and point the operator
-    at go-gtids.
-  - Refuse if the target has other databases with data beyond what was just
-    loaded? At minimum warn: `RESET MASTER` destroys the target's binlog
-    history.
-  - Requires `SUPER`/`SYSTEM_VARIABLES_ADMIN`; detect the privilege error and
-    print a Cloud SQL/RDS-specific hint (use provider external replication API).
-  - MySQL 8.0+ allows *appending* to `gtid_purged` with a leading `+`; consider
-    `--set-gtid-purged=append` for partial-seed scenarios.
+- Reads `gtid_set` from `metadata.json`; fails before loading anything if the
+  dump has no GTID set. The set is whitespace-stripped and format-validated
+  before being embedded in SQL.
+- Requires `gtid_mode=ON`; points file/position users at
+  `change-replication-source.sql` otherwise.
+- Refuses on a **running** replication channel always; on a configured-stopped
+  channel unless `--force` (version-gated `SHOW REPLICA STATUS` /
+  `SHOW SLAVE STATUS`).
+- Errant gate: if `GTID_SUBTRACT(gtid_executed, dump_set)` is non-empty,
+  refuses **even with `--force`** and points at go-gtids. Remediation stays
+  out of go-load by design.
+- Empty `gtid_executed` (the `--skip-binlog` path): sets `gtid_purged`
+  directly, no reset, no `--force`. Non-empty subset: requires `--force`, then
+  version-gated `RESET MASTER` / `RESET BINARY LOGS AND GTIDS` (8.4+).
+- Verifies afterwards that `gtid_executed` equals the dump set exactly.
+- Unit-tested against a scripted fake driver (11 tests: refusal paths, version
+  gating, injection attempts); matrix-tested on 5.7.44/8.0.45/8.4.10/9.7.1
+  including the errant-refusal and reset→seed success paths.
+
+Not implemented (still open): `--set-gtid-purged=append` (leading-`+` subset
+append, 8.0+) for partial-seed scenarios.
 
 ### 2. `go-load --skip-binlog` — ✅ DONE (2026-07-03)
 
@@ -91,18 +92,18 @@ instead of assuming.
 
 ### 3. `go-load --change-source` / emit a helper script at dump time
 
-Two options (pick one, or both):
-
-- **Load-time:** `go-load --change-source --source-host ... --source-user ...
-  --source-password-env ...` runs `CHANGE REPLICATION SOURCE TO ...
-  SOURCE_AUTO_POSITION=1` + `START REPLICA` after `--set-gtid-purged`.
-  Version-gate the syntax (`CHANGE MASTER TO` + `MASTER_AUTO_POSITION` on 5.7,
-  `START SLAVE` on 5.7).
-- **Dump-time:** with `--get-master-status`, also write
-  `change-replication-source.sql` containing a ready-to-edit template with the
-  captured coordinates filled in (both GTID auto-position and file/position
-  variants, one commented out). Zero risk, no new privileges, helps the manual
-  workflow immediately. **Recommended first step.**
+- **Dump-time template — ✅ DONE (2026-07-03):** with `--get-master-status`,
+  go-dump writes `change-replication-source.sql`
+  (`taskmanager.go writeChangeSourceTemplate`): captured coordinates filled in,
+  GTID auto-position as the active statements, 5.7 and file/position variants
+  commented. Always plain (never gzipped); go-load's `findFiles` skips it
+  during restore.
+- **Load-time `--change-source` — still open:** `go-load --change-source
+  --source-host ... --source-user ... --source-password-env ...` runs
+  `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1` + `START REPLICA`
+  after `--set-gtid-purged`, then polls `SHOW REPLICA STATUS` until the
+  threads run or a timeout. Version-gate the syntax (`CHANGE MASTER TO` +
+  `MASTER_AUTO_POSITION`, `START SLAVE` on 5.7).
 
 ### 4. Rename `master-data.sql` / `slave-data.sql` → `.txt`
 
@@ -148,8 +149,9 @@ needs `SET GLOBAL gtid_slave_pos = '...'` +
 ## Suggested implementation order
 
 1. ~~`go-load --skip-binlog` (item 2)~~ — ✅ done 2026-07-03.
-2. Dump-time `change-replication-source.sql` template (item 3b) — small, safe,
-   immediately useful.
-3. `go-load --set-gtid-purged` (item 1).
-4. `go-load --change-source` (item 3a).
-5. File rename (item 4) and MariaDB flavor support (item 5) as follow-ups.
+2. ~~Dump-time `change-replication-source.sql` template (item 3)~~ — ✅ done
+   2026-07-03.
+3. ~~`go-load --set-gtid-purged` (item 1)~~ — ✅ done 2026-07-03.
+4. `go-load --change-source` (item 3, load-time half) — next up.
+5. File rename (item 4), MariaDB flavor support (item 5), and
+   `--set-gtid-purged=append` as follow-ups.

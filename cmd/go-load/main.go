@@ -29,18 +29,20 @@ func main() {
 		socket   string
 		database string
 
-		directory  string
-		file       string
-		pattern    string
-		workers    int
-		dataOnly   bool
-		skipBinlog bool
-		verify     bool
-		resume     bool
-		quiet      bool
-		debug      bool
-		iniFile    string
-		flagVersion bool
+		directory     string
+		file          string
+		pattern       string
+		workers       int
+		dataOnly      bool
+		skipBinlog    bool
+		setGtidPurged bool
+		force         bool
+		verify        bool
+		resume        bool
+		quiet         bool
+		debug         bool
+		iniFile       string
+		flagVersion   bool
 	)
 
 	flag.StringVar(&host, "host", "localhost", "MySQL host")
@@ -55,6 +57,8 @@ func main() {
 	flag.IntVar(&workers, "workers", 4, "Number of parallel workers for data files")
 	flag.BoolVar(&dataOnly, "data-only", false, "Skip schema (definition) files; load data files only")
 	flag.BoolVar(&skipBinlog, "skip-binlog", false, "Run SET SQL_LOG_BIN=0 on every load connection so the restore is not written to the target's binlog or replicated downstream. Requires SUPER or SYSTEM_VARIABLES_ADMIN.")
+	flag.BoolVar(&setGtidPurged, "set-gtid-purged", false, "After the load, set the target's gtid_purged to the dump's captured GTID set (from metadata.json) so it can replicate with SOURCE_AUTO_POSITION=1. Refuses on active replicas or errant transactions.")
+	flag.BoolVar(&force, "force", false, "With --set-gtid-purged: allow acting on a stopped replication channel, and allow RESET MASTER / RESET BINARY LOGS AND GTIDS when the target's gtid_executed is non-empty (destroys the target's binlog history).")
 	flag.BoolVar(&verify, "verify", false, "Verify checksums after loading (requires checksums.txt in --directory)")
 	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json")
 	flag.BoolVar(&quiet, "quiet", false, "Suppress INFO messages")
@@ -94,6 +98,9 @@ func main() {
 	if file == "" && directory == "" {
 		log.Fatal("Specify --file or --directory. Use --help for usage.")
 	}
+	if setGtidPurged && directory == "" {
+		log.Fatal("--set-gtid-purged requires --directory (the GTID set comes from the dump's metadata.json).")
+	}
 
 	db, err := connect(host, port, user, password, socket, database)
 	if err != nil {
@@ -123,12 +130,23 @@ func main() {
 
 	if directory != "" {
 		// Log useful context from the source dump's metadata if present.
-		if meta, err := dump.LoadDumpMetadata(directory); err == nil {
+		meta, metaErr := dump.LoadDumpMetadata(directory)
+		if metaErr == nil {
 			log.Infof("Source: MySQL %s on %s, dump status: %s",
 				meta.MySQLVersion, meta.MySQLHost, meta.Status)
 			if meta.BinlogFile != "" {
 				log.Infof("Binlog position: %s:%d  GTID: %s",
 					meta.BinlogFile, meta.BinlogPosition, meta.GTIDSet)
+			}
+		}
+		if setGtidPurged {
+			// Fail before loading anything, not after: a missing GTID set means
+			// the dump cannot seed a replica at all.
+			if metaErr != nil {
+				log.Fatalf("--set-gtid-purged: cannot read metadata.json: %v", metaErr)
+			}
+			if meta.GTIDSet == "" {
+				log.Fatal("--set-gtid-purged: metadata.json has no gtid_set — the dump was taken without --get-master-status, or the source has no GTIDs.")
 			}
 		}
 
@@ -151,6 +169,13 @@ func main() {
 				log.Fatalf("Checksum verification failed:\n  %v", err)
 			}
 			log.Info("Checksum verification passed.")
+		}
+
+		if setGtidPurged {
+			log.Info("Applying the dump's GTID set to the target (--set-gtid-purged)...")
+			if err := load.ApplyGTIDPurged(ctx, db, meta.GTIDSet, force); err != nil {
+				log.Fatalf("%v", err)
+			}
 		}
 	} else {
 		if err := imp.ImportFile(ctx, file); err != nil {

@@ -20,11 +20,14 @@
 x-mysql-env: &mysql-env
   MYSQL_ROOT_PASSWORD: s3cr3t
 
+# TCP explicitly: during first-boot init MySQL runs a temporary socket-only
+# server that answers socket pings long before the real server listens on
+# 3306 — a socket healthcheck reports healthy prematurely.
 x-healthcheck: &mysql-health
-  test: ["CMD", "mysqladmin", "ping", "-uroot", "-ps3cr3t", "--silent"]
+  test: ["CMD", "mysql", "-h127.0.0.1", "--protocol=tcp", "-uroot", "-ps3cr3t", "-e", "SELECT 1"]
   interval: 2s
   timeout: 5s
-  retries: 60
+  retries: 90
 
 services:
   mysql57:

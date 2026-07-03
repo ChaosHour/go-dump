@@ -107,9 +107,11 @@ make test-versions-down    # tear down (removes volumes)
 
 The matrix (`test/docker-compose.versions.yml` + `test/test-versions.sh`)
 verifies, per version: GTID capture in `metadata.json`, a full
-drop-database→restore→checksum-verify round trip, and that
-`go-load --skip-binlog` leaves `gtid_executed` byte-identical.
-MySQL 5.7 runs under amd64 emulation on Apple Silicon (Rosetta).
+drop-database→restore→checksum-verify round trip, `go-load --skip-binlog`
+leaving `gtid_executed` byte-identical, the `change-replication-source.sql`
+template, and `--set-gtid-purged` (both the errant-transaction refusal and the
+reset→seed success path). MySQL 5.7 runs under amd64 emulation on Apple
+Silicon (Rosetta).
 
 The `VERSION` file controls the embedded version string. Override at build time:
 
@@ -208,7 +210,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | `--compress` | false | Gzip-compress output files (`.sql.gz`). |
 | `--compress-level` | 1 | Compression level 1 (fastest) to 9 (smallest). |
 | `--checksum` | false | Run `CHECKSUM TABLE` after the dump and write `checksums.txt`. |
-| `--get-master-status` | false | Record binlog file/position and GTID set in `master-data.sql` and `metadata.json`. |
+| `--get-master-status` | false | Record binlog file/position and GTID set in `master-data.sql` and `metadata.json`, and write the `change-replication-source.sql` setup template. |
 | `--get-slave-status` | false | Record replica status in `slave-data.sql`. |
 | `--output-chunk-size` | 0 | Rows per INSERT statement (0 = same as chunk-size). |
 
@@ -477,6 +479,7 @@ A dump of `myapp.orders` with 4 threads produces:
 /backups/myapp/
 ├── metadata.json                          # dump metadata (MySQL version, binlog, table status)
 ├── master-data.sql                        # binlog position / GTID set (--get-master-status)
+├── change-replication-source.sql          # ready-to-edit replica setup script (--get-master-status)
 ├── slave-data.sql                         # replica status (--get-slave-status)
 ├── checksums.txt                          # CHECKSUM TABLE results (--checksum)
 ├── myapp-schema-create.sql                # CREATE DATABASE IF NOT EXISTS (one per schema)
@@ -606,28 +609,27 @@ This records in `/backups/seed/metadata.json`:
 and the same values in human-readable form in `master-data.sql` (a text report,
 not executable SQL — go-load skips it automatically).
 
+The dump also writes **`change-replication-source.sql`** — a ready-to-edit
+script with the captured coordinates already filled in (GTID auto-position,
+5.7 syntax, and file/position variants). go-load never executes it; it is for
+you.
+
 Restore onto the new replica, then configure replication:
 
 ```bash
-# 1. Load the data (go-load prints the recorded binlog/GTID coordinates).
-#    --skip-binlog keeps the load out of the replica's own binlog/GTID history,
-#    so gtid_purged can be set afterwards without RESET MASTER.
+# 1. Load the data and hand over the GTID state in one step:
+#    --skip-binlog     keeps the load out of the replica's own GTID history
+#    --set-gtid-purged sets gtid_purged to the dump's snapshot GTID set
+#                      (from metadata.json), with safety checks — it refuses
+#                      on running replicas and on errant transactions.
 go-load --host replica1 --user root --password ... \
-  --directory /backups/seed --workers 8 --verify --skip-binlog
+  --directory /backups/seed --workers 8 --verify \
+  --skip-binlog --set-gtid-purged
 ```
 
 ```sql
--- 2. On the replica: set gtid_purged to the dump's snapshot GTID set
---    (from metadata.json "gtid_set").
---    gtid_purged can only be set while gtid_executed is empty. With
---    --skip-binlog above (and a fresh instance), it already is. If the load
---    ran WITHOUT --skip-binlog, clear the local GTID history first:
---      RESET MASTER;                   -- MySQL <= 8.0 / 5.7
---      RESET BINARY LOGS AND GTIDS;    -- MySQL 8.4+
---    (destructive: wipes the replica's own binlogs — never run on the primary)
-SET GLOBAL gtid_purged = '3e11fa47-71ca-11e1-9e33-c80aa9429562:1-123';
-
--- 3. Point the replica at the primary using auto-positioning.
+-- 2. Point the replica at the primary: edit SOURCE_USER / SOURCE_PASSWORD in
+--    the dump's change-replication-source.sql and run it, or by hand:
 CHANGE REPLICATION SOURCE TO
   SOURCE_HOST = 'primary1.db.internal',
   SOURCE_PORT = 3306,
@@ -636,11 +638,28 @@ CHANGE REPLICATION SOURCE TO
   SOURCE_AUTO_POSITION = 1;         -- MySQL 8.0.23+; use CHANGE MASTER TO / MASTER_AUTO_POSITION=1 on 5.7
 START REPLICA;                      -- START SLAVE on 5.7
 
--- 4. Verify
+-- 3. Verify
 SHOW REPLICA STATUS\G               -- Replica_IO_Running / Replica_SQL_Running: Yes
 ```
 
 Then prove the seed is clean with go-gtids — see the step-through guide below.
+
+**What `--set-gtid-purged` does, and its guard rails:**
+
+- Reads `gtid_set` from the dump's `metadata.json` (fails up front if the dump
+  was taken without `--get-master-status`).
+- Requires `gtid_mode=ON` on the target.
+- **Refuses** if the target has a *running* replication channel (always), or a
+  configured-but-stopped one (unless `--force`).
+- If the target's `gtid_executed` is empty (the `--skip-binlog` path, or a
+  fresh instance): just sets `gtid_purged`. No reset, no `--force` needed.
+- If `gtid_executed` is non-empty but a subset of the dump's set (e.g. the
+  load itself was binlogged): requires `--force`, then runs `RESET MASTER`
+  (8.4+/9: `RESET BINARY LOGS AND GTIDS`) before setting `gtid_purged` —
+  destructive to the target's own binlog history, hence the flag.
+- If the target has transactions **beyond** the dump's set: refuses, even with
+  `--force` — that's errant-transaction territory; inspect with go-gtids.
+- Verifies afterwards that `gtid_executed` equals the dump's set exactly.
 
 ### Verifying a replica with go-gtids (errant transaction check)
 
