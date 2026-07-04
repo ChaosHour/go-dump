@@ -220,7 +220,11 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--destination` | — | **Required.** Directory to write dump files. Created if it does not exist. |
-| `--add-drop-table` | false | Prepend `DROP TABLE IF EXISTS` before each `CREATE TABLE`. |
+| `--add-drop-table` | false | Prepend `DROP TABLE IF EXISTS` before each `CREATE TABLE` (and `DROP ... IF EXISTS` before each trigger/routine/event). |
+| `--triggers` | false | Dump triggers for the dumped tables → `<schema>.<table>-triggers.sql`. |
+| `--routines` | false | Dump stored procedures and functions for the dumped schemas → `<schema>-routines.sql`. |
+| `--events` | false | Dump events for the dumped schemas → `<schema>-events.sql`. |
+| `--skip-definer` | false | Strip `DEFINER=user@host` from trigger/routine/event definitions so they load on targets where the definer account does not exist. |
 | `--skip-use-database` | false | Omit `USE \`schema\`` statements from chunk files. |
 | `--compress` | false | Gzip-compress output files (`.sql.gz`). |
 | `--compress-level` | 1 | Compression level 1 (fastest) to 9 (smallest). |
@@ -447,6 +451,38 @@ go-dump \
 # Output files: myapp.orders-thread0.sql.gz, myapp.orders-definition.sql.gz, etc.
 ```
 
+### Dump with triggers, stored routines, and events
+
+```bash
+go-dump \
+  --ini-file /etc/go-dump/prod.ini \
+  --databases myapp \
+  --destination /backups/myapp \
+  --triggers \
+  --routines \
+  --events \
+  --skip-definer \
+  --execute
+# Extra output files:
+#   myapp.orders-triggers.sql   one per table that has triggers
+#   myapp-routines.sql          procedures + functions, one per schema
+#   myapp-events.sql            events, one per schema
+# metadata.json records the counts under "objects".
+```
+
+- Definitions are wrapped in mysqldump-style `sql_mode` / charset guards and
+  `DELIMITER ;;` blocks — they restore with go-load or the plain `mysql` client.
+- `--skip-definer` strips `DEFINER=user@host` so objects load on targets where
+  the definer account does not exist (the most common restore failure —
+  without it the target needs the same accounts or `CREATE` fails with
+  errno 1449). Objects are then created with the loading user as definer.
+- go-load applies triggers **after** the table data, so audit/history triggers
+  do not fire once per restored row.
+- Events restore with their original `ENABLE`/`DISABLE` status; go-dump and
+  go-load never touch the target's `event_scheduler` setting.
+- Missing privileges (`SHOW_ROUTINE`, `EVENT`, `TRIGGER`) skip the affected
+  object with a warning instead of failing the dump.
+
 ### Large table — tune chunk size
 
 For an 8M-row table dumped with 4 threads:
@@ -504,7 +540,10 @@ A dump of `myapp.orders` with 4 threads produces:
 ├── myapp.orders-thread2.sql               # rows assigned to worker 2
 ├── myapp.orders-thread3.sql               # rows assigned to worker 3
 ├── myapp.customers-definition.sql
-└── myapp.customers.sql                    # tables without a PK produce a single file
+├── myapp.customers.sql                    # tables without a PK produce a single file
+├── myapp.orders-triggers.sql              # triggers, per table (--triggers)
+├── myapp-routines.sql                     # procedures + functions, per schema (--routines)
+└── myapp-events.sql                       # events, per schema (--events)
 ```
 
 ### metadata.json
@@ -559,8 +598,11 @@ myapp.customers   918273645     2026-06-10T14:05:32Z
 
 go-load (in this repo) loads files in the right order automatically:
 database creation (`*-schema-create.sql`), then table definitions, then data
-files in parallel — so a dump restores onto a server where the database does
-not exist yet.
+files in parallel, then routines, events, and finally triggers — so a dump
+restores onto a server where the database does not exist yet, and triggers
+never fire while the data is being loaded. go-load understands the
+`DELIMITER ;;` blocks in the object files, so they also restore with the plain
+`mysql` client.
 
 ```bash
 go-load --host target-host --user root --password ... --directory /backups/myapp --workers 4 --verify
@@ -849,17 +891,21 @@ Notes:
 
 Know these before relying on a dump for replica seeding or disaster recovery:
 
-- **Base tables only.** go-dump discovers `TABLE_TYPE = 'BASE TABLE'` — it does
-  **not** dump views, triggers, stored procedures/functions, or events. If your
-  schema uses them, capture them separately and load them after the data:
+- **Views are not dumped.** go-dump discovers `TABLE_TYPE = 'BASE TABLE'` and
+  can carry triggers, routines, and events with `--triggers --routines
+  --events` — but **views** still need a separate pass:
 
   ```bash
-  mysqldump --no-data --no-create-info --routines --events --triggers \
-    -h source-host -u backup -p myapp > myapp-objects.sql
+  mysqldump --no-data --skip-triggers --set-gtid-purged=OFF \
+    -h source-host -u backup -p myapp view1 view2 > myapp-views.sql
   ```
 
-  A replica seeded without its views/routines will error on reads that use
-  them, even though replication itself runs fine.
+  A replica seeded without its views will error on reads that use them, even
+  though replication itself runs fine.
+- **Object definitions are not snapshot-consistent.** Triggers, routines, and
+  events are read with `SHOW CREATE ...`, which is not MVCC-protected — a
+  definition changed in the milliseconds between the lock window and the
+  object read is captured in its newer form.
 - **Users and grants are not dumped** unless `--all-databases
   --include-system-databases` is used (raw `mysql.*` tables, on-prem only —
   never against Cloud SQL/RDS). For portable account DDL, use

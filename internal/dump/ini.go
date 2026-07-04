@@ -121,6 +121,14 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 			do.GetSlaveStatus, errBool = strconv.ParseBool(key.Value())
 		case "add-drop-table":
 			do.AddDropTable, errBool = strconv.ParseBool(key.Value())
+		case "triggers":
+			do.DumpTriggers, errBool = strconv.ParseBool(key.Value())
+		case "routines":
+			do.DumpRoutines, errBool = strconv.ParseBool(key.Value())
+		case "events":
+			do.DumpEvents, errBool = strconv.ParseBool(key.Value())
+		case "skip-definer":
+			do.SkipDefiner, errBool = strconv.ParseBool(key.Value())
 		case "checksum":
 			do.Checksum, errBool = strconv.ParseBool(key.Value())
 		case "resume":

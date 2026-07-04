@@ -39,6 +39,7 @@ type DumpMetadata struct {
 	BinlogPosition int              `json:"binlog_position,omitempty"`
 	GTIDSet        string           `json:"gtid_set,omitempty"`
 	CharacterSet   string           `json:"character_set"`
+	Objects        map[string]int   `json:"objects,omitempty"` // "triggers"/"routines"/"events" -> count dumped
 	Tables         []*TableMetadata `json:"tables"`
 
 	mu   sync.Mutex
@@ -139,6 +140,14 @@ func (m *DumpMetadata) SetChecksum(schema, name string, checksum int64) {
 			break
 		}
 	}
+}
+
+// SetObjects records how many triggers/routines/events were dumped.
+func (m *DumpMetadata) SetObjects(counts map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.Objects = counts
+	_ = m.write()
 }
 
 // Complete marks the dump finished and writes the final metadata file.

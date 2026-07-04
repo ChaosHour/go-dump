@@ -42,8 +42,10 @@ Three things this told us:
   and **survives** `STOP REPLICA` and `RESET MASTER`. We will not need the
   replication password at all. (`RESET REPLICA ALL` would wipe it — don't.)
 - **Databases to reseed**: `ca_analysis chaos go_bills roll_back sakila`.
-- **Objects go-dump won't carry**: 9 views, 7 routines, 6 triggers, 1 event
-  (`information_schema.views/routines/triggers/events`). Step 6 handles them.
+- **Non-table objects**: 9 views, 7 routines, 6 triggers, 1 event
+  (`information_schema.views/routines/triggers/events`). Routines, triggers,
+  and events ride along with `--triggers --routines --events`; views need the
+  extra pass in step 5.
 
 ## Step 1 — Dump the primary with GTID capture
 
@@ -153,11 +155,23 @@ INFO gtid_purged set to the dump's snapshot GTID set. Next: CHANGE REPLICATION
 
 ## Step 5 — Views, routines, triggers, events
 
-go-dump moves base tables only. This schema had 9 views, 7 routines,
-6 triggers, 1 event — without them the replica errors on any read through a
-view, even though replication itself would run fine. Copy them with
-mysqldump, **loading with binlog disabled** for the same errant-GTID reason
-as step 3.
+This schema had 9 views, 7 routines, 6 triggers, 1 event — without them the
+replica errors on any read through a view, even though replication itself
+would run fine.
+
+go-dump now carries routines, triggers, and events natively: add
+`--triggers --routines --events` (and usually `--skip-definer`) to the
+step-1 dump, and go-load applies them in the right order — triggers after
+the data, so they don't fire during the restore — on the same
+`--skip-binlog` connections, keeping the replica's GTID history clean:
+
+```bash
+go-dump ... --triggers --routines --events --skip-definer --execute
+go-load ... --skip-binlog --set-gtid-purged --directory /backups/seed
+```
+
+That leaves only **views**, which still need a mysqldump pass, **loading
+with binlog disabled** for the same errant-GTID reason as step 3.
 
 Two mysqldump traps we hit doing this for real:
 
