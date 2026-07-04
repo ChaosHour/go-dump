@@ -36,7 +36,7 @@ func PrintUsage(flags map[string]*flag.Flag) {
 
 	fmt.Fprintln(w, "# General:")
 	for _, opt := range []string{"help", "dry-run", "execute", "debug", "quiet", "version",
-		"lock-tables", "channel-buffer-size", "chunk-size", "tables-without-uniquekey",
+		"lock-tables", "lock-wait-timeout", "channel-buffer-size", "chunk-size", "tables-without-uniquekey",
 		"threads", "compress", "compress-level", "consistent", "isolation-level", "where", "ini-file"} {
 		printOption(w, flags[opt])
 	}
@@ -80,6 +80,7 @@ func main() {
 	flag.Uint64Var(&dumpOptions.StatementSize, "statement-size", 16*1024*1024, "Max bytes per INSERT statement. Rows are grouped until this cap so wide TEXT/BLOB rows never exceed the target's max_allowed_packet. 0 disables the cap.")
 	flag.IntVar(&dumpOptions.ChannelBufferSize, "channel-buffer-size", 1000, "Task channel buffer size.")
 	flag.BoolVar(&dumpOptions.LockTables, "lock-tables", true, "Lock tables to get a consistent backup.")
+	flag.IntVar(&dumpOptions.LockWaitTimeout, "lock-wait-timeout", 60, "Seconds to wait for FLUSH TABLES WITH READ LOCK / LOCK TABLES before aborting. Prevents a blocked lock from stalling the whole server. 0 = server default.")
 	flag.StringVar(&dumpOptions.TablesWithoutUKOption, "tables-without-uniquekey", "error", "Action for tables without a primary or unique key. Valid: 'error', 'single-chunk', 'skip'.")
 	flag.BoolVar(&dumpOptions.TemporalOptions.Debug, "debug", false, "Display debug information.")
 	flag.StringVar(&dumpOptions.DestinationDir, "destination", "", "Directory to store the dumps.")

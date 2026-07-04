@@ -113,6 +113,14 @@ func (t *Task) CreateChunks(db *sql.DB) {
 		switch t.TaskManager.TablesWithoutPKOption {
 		case "single-chunk":
 			log.Debugf("Table %s has no primary/unique key — dumping as a single chunk.", t.Table.GetFullName())
+			// A single-chunk table is read in one unchunked query with no
+			// parallelism. Warn when it is large so slow dumps are explained
+			// up front (estimate from information_schema, so approximate).
+			if t.Table.estDataSize > 1<<30 {
+				log.Warningf("Table %s (~%.1f GB) has no single-column integer key and will dump as ONE unchunked query — "+
+					"no parallelism for this table. Consider adding an integer key.",
+					t.Table.GetFullName(), float64(t.Table.estDataSize)/(1<<30))
+			}
 			err := tx.QueryRowContext(ctx, t.GetSingleChunkTestQuery()).Scan(&chunkMax)
 			switch {
 			case err == nil:
