@@ -67,7 +67,13 @@ seed() {
             UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) t1,
            (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4
             UNION SELECT 5 UNION SELECT 6 UNION SELECT 7 UNION SELECT 8 UNION SELECT 9) t2,
-           (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) t3;"
+           (SELECT 0 n UNION SELECT 1 UNION SELECT 2 UNION SELECT 3 UNION SELECT 4) t3;
+    CREATE TABLE matrix.keyless (
+      name VARCHAR(64) NOT NULL,
+      payload TEXT
+    ) ENGINE=InnoDB;
+    INSERT INTO matrix.keyless
+      SELECT CONCAT('k-', id), REPEAT('x', 2048) FROM matrix.items LIMIT 200;"
 }
 
 run_version() {
@@ -82,14 +88,17 @@ run_version() {
   echo "   server: $server_version"
 
   seed "$v"
-  local rows_before
+  local rows_before keyless_before
   rows_before=$(msql "$v" "SELECT COUNT(*) FROM matrix.items;")
+  keyless_before=$(msql "$v" "SELECT COUNT(*) FROM matrix.keyless;")
 
-  # 1. Dump with GTID capture + checksums
+  # 1. Dump with GTID capture + checksums. matrix.keyless (no PK) exercises
+  #    the single-chunk streaming path.
   $GODUMP --mysql-host 127.0.0.1 --mysql-port "$port" \
     --mysql-user root --mysql-password s3cr3t \
     --databases matrix --destination "$dest" \
     --threads 2 --chunk-size 100 \
+    --tables-without-uniquekey single-chunk \
     --get-master-status --checksum --add-drop-table \
     --quiet --execute
 
@@ -101,13 +110,16 @@ run_version() {
   $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
     --directory "$dest" --workers 2 --verify --quiet
 
-  local rows_after
+  local rows_after keyless_after
   rows_after=$(msql "$v" "SELECT COUNT(*) FROM matrix.items;")
   [[ "$rows_after" == "$rows_before" ]] \
     || { echo "   FAIL: rows $rows_before -> $rows_after after restore"; return 1; }
+  keyless_after=$(msql "$v" "SELECT COUNT(*) FROM matrix.keyless;")
+  [[ "$keyless_after" == "$keyless_before" ]] \
+    || { echo "   FAIL: keyless rows $keyless_before -> $keyless_after after restore"; return 1; }
 
   # 3. --skip-binlog: reload must leave gtid_executed untouched
-  msql "$v" "TRUNCATE TABLE matrix.items;"
+  msql "$v" "TRUNCATE TABLE matrix.items; TRUNCATE TABLE matrix.keyless;"
   local gtid_before gtid_after
   gtid_before=$(msql "$v" "SELECT @@global.gtid_executed;")
   $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
@@ -130,7 +142,7 @@ run_version() {
 
   # 5. --set-gtid-purged must REFUSE while gtid_executed exceeds the dump set
   #    (all the binlogged seed/drop/restore activity above is "beyond" it).
-  msql "$v" "TRUNCATE TABLE matrix.items;"
+  msql "$v" "TRUNCATE TABLE matrix.items; TRUNCATE TABLE matrix.keyless;"
   if $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
       --directory "$dest" --workers 2 --data-only --set-gtid-purged --force --quiet 2>"$dest/refusal.log"; then
     echo "   FAIL: --set-gtid-purged did not refuse a target with extra GTIDs"; return 1
@@ -143,7 +155,7 @@ run_version() {
   local reset="RESET MASTER"
   case "$v" in 84|9) reset="RESET BINARY LOGS AND GTIDS" ;; esac
   msql "$v" "$reset;"
-  msql "$v" "SET SESSION sql_log_bin=0; TRUNCATE TABLE matrix.items;"
+  msql "$v" "SET SESSION sql_log_bin=0; TRUNCATE TABLE matrix.items; TRUNCATE TABLE matrix.keyless;"
   $GOLOAD --host 127.0.0.1 --port "$port" --user root --password s3cr3t \
     --directory "$dest" --workers 2 --data-only --skip-binlog --set-gtid-purged --quiet
 

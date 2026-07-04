@@ -12,6 +12,7 @@ type DumpOptions struct {
 	StatementSize         uint64 // max bytes per INSERT statement; a row group is flushed once it exceeds this
 	ChannelBufferSize     int
 	LockTables            bool
+	LockWaitTimeout       int // seconds to wait for FTWRL / LOCK TABLES before aborting
 	TablesWithoutUKOption string
 	DestinationDir        string
 	AddDropTable          bool
@@ -30,9 +31,9 @@ type DumpOptions struct {
 }
 
 type TemporalOptions struct {
-	Tables, Databases, IsolationLevel                    string
-	AllDatabases, Debug, DryRun, Execute, Quiet          bool
-	IncludeSystemDatabases                               bool
+	Tables, Databases, IsolationLevel           string
+	AllDatabases, Debug, DryRun, Execute, Quiet bool
+	IncludeSystemDatabases                      bool
 }
 
 type MySQLHost struct {
@@ -57,6 +58,7 @@ func GetDumpOptions() *DumpOptions {
 		StatementSize:         16 * 1024 * 1024,
 		ChannelBufferSize:     1000,
 		LockTables:            true,
+		LockWaitTimeout:       60,
 		TablesWithoutUKOption: "error",
 		AddDropTable:          false,
 		GetMasterStatus:       true,

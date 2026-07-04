@@ -603,9 +603,27 @@ func (tm *TaskManager) GetTransactions(lockTables bool, allDatabases bool) {
 			// non-InnoDB engines during the window.
 			lockSQL = GetLockAllTablesSQL()
 		}
+
+		// MySQL's default lock_wait_timeout is one year. FTWRL queues behind
+		// any long-running statement, and every query issued after it queues
+		// behind FTWRL — so an unbounded wait turns one slow query into a
+		// server-wide stall. Bound it and fail loudly instead.
+		timeout := tm.DumpOptions.LockWaitTimeout
+		if timeout > 0 {
+			if _, err := lockConn.ExecContext(tm.ctx,
+				fmt.Sprintf("SET SESSION lock_wait_timeout = %d", timeout)); err != nil {
+				log.Warningf("Could not set lock_wait_timeout: %v", err)
+			}
+		}
+
 		log.Info("Locking tables to synchronise worker snapshots and binlog position.")
 		startLocking = time.Now()
 		if _, err := lockConn.ExecContext(tm.ctx, lockSQL); err != nil {
+			var me *mysql.MySQLError
+			if errors.As(err, &me) && me.Number == 1205 {
+				log.Fatalf("Could not acquire the table lock within %ds — a long-running query is likely blocking it. "+
+					"Check SHOW PROCESSLIST, retry when quiet, or raise --lock-wait-timeout. Error: %v", timeout, err)
+			}
 			log.Fatalf("Error locking the tables: %v", err)
 		}
 	}
@@ -793,26 +811,37 @@ func (tm *TaskManager) StartWorker(workerId int) {
 			log.Fatalf("Error writing dump file for %s: %v", tablename, err)
 		}
 
-		var parseErr error
-		for attempt := 1; ; attempt++ {
-			chunkStage.Reset()
-			parseErr = chunk.Parse(stmt, &chunkStage)
-			if parseErr == nil || attempt >= maxChunkAttempts || !isRetryableChunkError(parseErr) {
-				break
+		if chunk.IsSingleChunk {
+			// Whole-table chunks (no usable integer key) are streamed straight
+			// to the dump file: staging them would hold the entire table in
+			// memory, which OOMs the dump host on large keyless tables. The
+			// trade-off is no transparent retry — bytes may already be on
+			// disk, so any error must abort the dump.
+			if err := chunk.Parse(stmt, buffer); err != nil {
+				log.Fatalf("Error dumping single-chunk table %s: %s", chunk.Task.Table.GetFullName(), err.Error())
 			}
-			log.Warningf("Transient error on chunk %d of %s (attempt %d/%d), retrying: %v",
-				chunk.Sequence, tablename, attempt, maxChunkAttempts, parseErr)
-			select {
-			case <-tm.ctx.Done():
-				log.Fatalf("Dump cancelled while retrying chunk for %s: %v", tablename, tm.ctx.Err())
-			case <-time.After(time.Duration(attempt) * time.Second):
+		} else {
+			var parseErr error
+			for attempt := 1; ; attempt++ {
+				chunkStage.Reset()
+				parseErr = chunk.Parse(stmt, &chunkStage)
+				if parseErr == nil || attempt >= maxChunkAttempts || !isRetryableChunkError(parseErr) {
+					break
+				}
+				log.Warningf("Transient error on chunk %d of %s (attempt %d/%d), retrying: %v",
+					chunk.Sequence, tablename, attempt, maxChunkAttempts, parseErr)
+				select {
+				case <-tm.ctx.Done():
+					log.Fatalf("Dump cancelled while retrying chunk for %s: %v", tablename, tm.ctx.Err())
+				case <-time.After(time.Duration(attempt) * time.Second):
+				}
 			}
-		}
-		if parseErr != nil {
-			log.Fatalf("Error parsing chunk for %s: %s", chunk.Task.Table.GetFullName(), parseErr.Error())
-		}
-		if _, err := buffer.Write(chunkStage.Bytes()); err != nil {
-			log.Fatalf("Error writing dump file for %s: %v", tablename, err)
+			if parseErr != nil {
+				log.Fatalf("Error parsing chunk for %s: %s", chunk.Task.Table.GetFullName(), parseErr.Error())
+			}
+			if _, err := buffer.Write(chunkStage.Bytes()); err != nil {
+				log.Fatalf("Error writing dump file for %s: %v", tablename, err)
+			}
 		}
 		// Flush before counting the chunk as completed: a table is only marked
 		// done in metadata once every one of its chunks has been handed to the OS.

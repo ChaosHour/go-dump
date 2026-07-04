@@ -191,7 +191,20 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | `--output-chunk-size` | 0 | Rows per `INSERT` statement. 0 = same as `--chunk-size`. |
 | `--statement-size` | 16MiB | Max **bytes** per `INSERT` statement, checked at row boundaries. Keeps wide TEXT/BLOB rows from producing statements larger than the target's `max_allowed_packet`. 0 disables. |
 | `--channel-buffer-size` | 1000 | Depth of the chunk work queue. Rarely needs tuning. |
-| `--tables-without-uniquekey` | error | What to do with tables that have no PK or unique key: `error` (abort), `single-chunk` (dump entire table in one query), `skip`. |
+| `--tables-without-uniquekey` | error | What to do with tables that have no usable chunk key: `error` (abort), `single-chunk` (dump entire table in one query, streamed), `skip`. Chunking needs a **single-column integer NOT NULL** primary/unique key — UUID/VARCHAR and composite keys fall into this option too. |
+
+### Memory and large tables
+
+- Worker memory ≈ `--threads` × (`--chunk-size` rows × average row bytes): each
+  chunk is staged in memory before it is written, so wide rows want a smaller
+  `--chunk-size`. Single-chunk tables are **streamed** and do not stage.
+- `--statement-size` (16MiB default) bounds INSERT statement bytes so the dump
+  stays loadable regardless of row width; raise `--output-chunk-size` /
+  `--chunk-size` for throughput, not beyond the target's memory.
+- On the **load** side, memory ≈ `--workers` × largest single statement; the
+  target server must also parse each statement — during a live re-seed test, 4
+  workers × 50k-row INSERTs OOM-killed a small MySQL container. Start with
+  `--workers 2` and 5000-row statements when the target is memory-constrained.
 
 ### Consistency
 
@@ -199,6 +212,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 |------|---------|-------------|
 | `--consistent` | true | Require a consistent (point-in-time) backup via MVCC. |
 | `--lock-tables` | true | Lock tables to establish the consistent snapshot. Required when `--consistent=true`. |
+| `--lock-wait-timeout` | 60 | Seconds to wait for `FLUSH TABLES WITH READ LOCK` / `LOCK TABLES` before aborting. Without a bound, a lock queued behind one long-running query stalls every subsequent query on the server. 0 = server default. |
 | `--isolation-level` | REPEATABLE READ | Transaction isolation level. Options: `REPEATABLE READ`, `READ COMMITTED`, `READ UNCOMMITTED`, `SERIALIZABLE`. |
 
 ### Output
