@@ -9,6 +9,7 @@ type DumpOptions struct {
 	Threads               int
 	ChunkSize             uint64
 	OutputChunkSize       uint64
+	StatementSize         uint64 // max bytes per INSERT statement; a row group is flushed once it exceeds this
 	ChannelBufferSize     int
 	LockTables            bool
 	TablesWithoutUKOption string
@@ -53,6 +54,7 @@ func GetDumpOptions() *DumpOptions {
 		Threads:               1,
 		ChunkSize:             1000,
 		OutputChunkSize:       0,
+		StatementSize:         16 * 1024 * 1024,
 		ChannelBufferSize:     1000,
 		LockTables:            true,
 		TablesWithoutUKOption: "error",

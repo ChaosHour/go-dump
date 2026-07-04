@@ -49,7 +49,7 @@ func PrintUsage(flags map[string]*flag.Flag) {
 		printOption(w, flags[opt])
 	}
 	fmt.Fprintln(w, "\n# Output options:")
-	for _, opt := range []string{"destination", "add-drop-table", "get-master-status", "get-slave-status", "output-chunk-size", "skip-use-database"} {
+	for _, opt := range []string{"destination", "add-drop-table", "get-master-status", "get-slave-status", "output-chunk-size", "statement-size", "skip-use-database"} {
 		printOption(w, flags[opt])
 	}
 	w.Flush()
@@ -77,6 +77,7 @@ func main() {
 	flag.IntVar(&dumpOptions.Threads, "threads", 1, "Number of threads to use.")
 	flag.Uint64Var(&dumpOptions.ChunkSize, "chunk-size", 1000, "Number of rows per read chunk.")
 	flag.Uint64Var(&dumpOptions.OutputChunkSize, "output-chunk-size", 0, "Number of rows per INSERT statement (0 = same as --chunk-size).")
+	flag.Uint64Var(&dumpOptions.StatementSize, "statement-size", 16*1024*1024, "Max bytes per INSERT statement. Rows are grouped until this cap so wide TEXT/BLOB rows never exceed the target's max_allowed_packet. 0 disables the cap.")
 	flag.IntVar(&dumpOptions.ChannelBufferSize, "channel-buffer-size", 1000, "Task channel buffer size.")
 	flag.BoolVar(&dumpOptions.LockTables, "lock-tables", true, "Lock tables to get a consistent backup.")
 	flag.StringVar(&dumpOptions.TablesWithoutUKOption, "tables-without-uniquekey", "error", "Action for tables without a primary or unique key. Valid: 'error', 'single-chunk', 'skip'.")

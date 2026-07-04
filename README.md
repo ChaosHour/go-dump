@@ -189,6 +189,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | `--threads` | 1 | Number of parallel worker goroutines. Match to available CPU cores and disk I/O capacity. |
 | `--chunk-size` | 1000 | Rows per read chunk (key range query). Larger = fewer queries, more memory per worker. |
 | `--output-chunk-size` | 0 | Rows per `INSERT` statement. 0 = same as `--chunk-size`. |
+| `--statement-size` | 16MiB | Max **bytes** per `INSERT` statement, checked at row boundaries. Keeps wide TEXT/BLOB rows from producing statements larger than the target's `max_allowed_packet`. 0 disables. |
 | `--channel-buffer-size` | 1000 | Depth of the chunk work queue. Rarely needs tuning. |
 | `--tables-without-uniquekey` | error | What to do with tables that have no PK or unique key: `error` (abort), `single-chunk` (dump entire table in one query), `skip`. |
 
@@ -581,8 +582,12 @@ Two distinct workflows:
 
 | Goal | How |
 |------|-----|
-| Seed a new replica and start replication | Dump **with** `--get-master-status`, restore, then set `gtid_purged` and configure replication (manual SQL today — see below) |
+| Seed a new replica and start replication | Dump **with** `--get-master-status`, restore with `--skip-binlog --set-gtid-purged`, run the generated `change-replication-source.sql` |
 | Repopulate tables/databases without touching replication | Dump **without** `--get-master-status` (the default) and just restore |
+
+A complete real-world transcript of re-seeding a live replica — including the
+failures (OOM, oversized packets) and the schema-objects companion steps — is
+in [docs/REPLICA-SEEDING-WALKTHROUGH.md](docs/REPLICA-SEEDING-WALKTHROUGH.md).
 
 ### Dumping with GTIDs (replica seeding)
 

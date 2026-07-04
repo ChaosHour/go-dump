@@ -194,6 +194,10 @@ func connect(host string, port int, user, password, socket, database string) (*s
 	cfg.DBName = database
 	cfg.AllowNativePasswords = true
 	cfg.ParseTime = true
+	// 0 = ask the server for max_allowed_packet. Without this the driver
+	// refuses statements over its own default even when the server would
+	// accept them ("packet for query is too large").
+	cfg.MaxAllowedPacket = 0
 
 	if socket != "" {
 		cfg.Net = "unix"
