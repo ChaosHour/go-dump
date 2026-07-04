@@ -25,6 +25,10 @@ type DumpOptions struct {
 	Consistent            bool
 	Checksum              bool
 	Resume                bool
+	DumpTriggers          bool
+	DumpRoutines          bool // stored procedures and functions
+	DumpEvents            bool
+	SkipDefiner           bool              // strip DEFINER=... from trigger/routine/event definitions
 	WhereConditions       map[string]string // table -> where condition
 	GlobalWhereCondition  string            // fallback for all tables
 	TemporalOptions       TemporalOptions

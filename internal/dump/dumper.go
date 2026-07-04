@@ -131,6 +131,9 @@ func Run(ctx context.Context, opts *DumpOptions) {
 		// dump (or a resumed one) is restorable as far as it got.
 		taskManager.WriteSchemaCreateSQL()
 		taskManager.WriteTablesSQL(opts.AddDropTable)
+		if counts := taskManager.WriteObjectsSQL(); counts != nil {
+			meta.SetObjects(counts)
+		}
 
 		taskManager.CreateChunksWaitGroup.Add(1)
 		go taskManager.CreateChunks(dbchunks)

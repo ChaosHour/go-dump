@@ -25,6 +25,7 @@ import (
 type FileLoad struct {
 	Path     string
 	IsSchema bool
+	IsPost   bool // trigger/routine/event file — loaded serially after all data
 }
 
 // Importer loads SQL files produced by go-dump into a MySQL server.
@@ -91,7 +92,7 @@ func (imp *Importer) ImportDirectory(ctx context.Context, dir, pattern string, l
 	// Count data files for progress reporting.
 	var total int64
 	for _, f := range files {
-		if !f.IsSchema {
+		if !f.IsSchema && !f.IsPost {
 			atomic.AddInt64(&total, 1)
 		}
 	}
@@ -122,7 +123,7 @@ func (imp *Importer) ImportDirectory(ctx context.Context, dir, pattern string, l
 	var wg sync.WaitGroup
 
 	for _, f := range files {
-		if f.IsSchema {
+		if f.IsSchema || f.IsPost {
 			continue
 		}
 		name := filepath.Base(f.Path)
@@ -160,6 +161,30 @@ func (imp *Importer) ImportDirectory(ctx context.Context, dir, pattern string, l
 	}
 	if len(errs) > 0 {
 		return fmt.Errorf("%d file(s) failed:\n  %s", len(errs), strings.Join(errs, "\n  "))
+	}
+
+	// Post-data files (routines, events, triggers): serial, and only after
+	// every data file has loaded — a trigger created before its table's data
+	// would fire for every restored row. Skipped with --data-only, like the
+	// schema files.
+	if !imp.skipSchema {
+		for _, f := range files {
+			if !f.IsPost {
+				continue
+			}
+			name := filepath.Base(f.Path)
+			if ls != nil && ls.HasFile(name) {
+				log.Infof("Resume: skipping %s", name)
+				continue
+			}
+			if err := imp.loadFile(ctx, f.Path); err != nil {
+				return fmt.Errorf("%s: %w", name, err)
+			}
+			if ls != nil {
+				_ = ls.Mark(name)
+			}
+			log.Infof("Loaded: %s", name)
+		}
 	}
 
 	log.Infof("Progress: %d/%d files loaded", atomic.LoadInt64(&done), total)
@@ -267,6 +292,10 @@ func execStream(ctx context.Context, conn *sql.Conn, r io.Reader) error {
 //   - backtick-quoted identifiers (” doubling, no backslash escapes)
 //   - line comments ("-- " per MySQL — the dashes must be followed by
 //     whitespace — and "#") and /* block comments */
+//   - DELIMITER directives (client-side, never sent to the server), so
+//     trigger/routine/event files whose bodies contain semicolons load
+//     correctly. A directive is only recognised on a line with no SQL
+//     before it, matching how go-dump and mysqldump emit them.
 //
 // Comment bytes are kept in the statement text (MySQL accepts leading
 // comments, and /*!...*/ versioned comments are executable), but a segment
@@ -283,6 +312,23 @@ func parseStatements(r io.Reader, cb func(string) error) error {
 	hasSQL := false // statement contains something beyond comments/whitespace
 	dashRun := 0    // consecutive '-' bytes seen outside quotes/comments
 
+	// Statement terminator state. delim is usually ";" but changes via
+	// DELIMITER directives; delimPos counts how many delimiter bytes have
+	// matched so far (multi-byte delimiters match incrementally).
+	delim := []byte{';'}
+	delimPos := 0
+
+	// DELIMITER directive detection. candidate is true while the current line
+	// could still be a directive (no SQL preceded it in the statement); wordPos
+	// tracks case-insensitive matching against "DELIMITER"; once the word plus
+	// whitespace is seen, inDirective captures the rest of the line as the new
+	// delimiter token.
+	const directiveWord = "DELIMITER"
+	candidate := true
+	wordPos := 0
+	inDirective := false
+	var dirBuf []byte
+
 	emit := func() error {
 		s := strings.TrimSpace(stmt.String())
 		stmt.Reset()
@@ -294,12 +340,59 @@ func parseStatements(r io.Reader, cb func(string) error) error {
 		return cb(s)
 	}
 
+	applyDirective := func() {
+		if token := strings.TrimSpace(string(dirBuf)); token != "" {
+			delim = []byte(token)
+		}
+		// The directive line (and any leading whitespace/comments) is consumed;
+		// it is a client instruction, not SQL.
+		stmt.Reset()
+		hasSQL = false
+		inDirective = false
+		candidate = true
+		wordPos = 0
+		dirBuf = dirBuf[:0]
+		delimPos = 0
+	}
+
 	buf := make([]byte, 64*1024)
 	for {
 		n, readErr := r.Read(buf)
 		for i := 0; i < n; i++ {
 			b := buf[i]
 
+			if inDirective {
+				if b == '\n' {
+					applyDirective()
+				} else {
+					dirBuf = append(dirBuf, b)
+				}
+				prev = b
+				continue
+			}
+
+			// Track the DELIMITER keyword at the start of a possible directive
+			// line. The matched letters still flow through normal processing
+			// below, so the statement is intact if the line turns out not to be
+			// a directive (e.g. "DELETE ...").
+			if candidate && inQuote == 0 && !inLineComment && !inBlockComment && !escaped && delimPos == 0 {
+				switch {
+				case wordPos < len(directiveWord) && upperByte(b) == directiveWord[wordPos]:
+					wordPos++
+				case wordPos == len(directiveWord) && (b == ' ' || b == '\t'):
+					inDirective = true
+					dirBuf = dirBuf[:0]
+					prev = b
+					continue // the space is part of the directive, not SQL
+				case wordPos == 0 && (b == ' ' || b == '\t' || b == '\r'):
+					// leading whitespace — line may still be a directive
+				default:
+					candidate = false
+					wordPos = 0
+				}
+			}
+
+		reprocess:
 			switch {
 			case escaped:
 				stmt.WriteByte(b)
@@ -331,10 +424,22 @@ func parseStatements(r io.Reader, cb func(string) error) error {
 					inQuote = 0
 				}
 
-			case b == ';':
-				// Terminating semicolons are not included in the statement body.
-				if err := emit(); err != nil {
-					return err
+			case delimPos > 0 || b == delim[0]:
+				// Delimiter bytes are not included in the statement body.
+				if b == delim[delimPos] {
+					delimPos++
+					if delimPos == len(delim) {
+						delimPos = 0
+						if err := emit(); err != nil {
+							return err
+						}
+					}
+				} else {
+					// Partial delimiter match failed: the matched bytes were
+					// ordinary SQL after all. Restore them and reread b.
+					stmt.Write(delim[:delimPos])
+					delimPos = 0
+					goto reprocess
 				}
 
 			case b == '\'' || b == '"' || b == '`':
@@ -370,6 +475,11 @@ func parseStatements(r io.Reader, cb func(string) error) error {
 			if b != '-' {
 				dashRun = 0
 			}
+			// A new line with no SQL accumulated yet may open a directive.
+			if b == '\n' && inQuote == 0 && !inBlockComment {
+				candidate = !hasSQL
+				wordPos = 0
+			}
 			prev = b
 		}
 		if readErr == io.EOF {
@@ -379,8 +489,22 @@ func parseStatements(r io.Reader, cb func(string) error) error {
 			return fmt.Errorf("read: %w", readErr)
 		}
 	}
-	// Handle trailing content without a terminating semicolon.
+	// Handle a directive or trailing content without a final newline/delimiter.
+	if inDirective {
+		applyDirective()
+	}
+	if delimPos > 0 {
+		stmt.Write(delim[:delimPos])
+	}
 	return emit()
+}
+
+// upperByte upper-cases a single ASCII letter.
+func upperByte(b byte) byte {
+	if b >= 'a' && b <= 'z' {
+		return b - ('a' - 'A')
+	}
+	return b
 }
 
 // splitStatements is a convenience wrapper around parseStatements that
@@ -409,9 +533,10 @@ func isRetryable(err error) bool {
 
 // findFiles returns all SQL files in dir: schema files first (database
 // schema-create files, then table definition files), then data files matching
-// pattern. When pattern ends with ".sql", compressed variants (*.sql.gz) are
-// automatically included so compressed dumps work without requiring the user
-// to change the pattern flag.
+// pattern, then post-data object files (routines, events, triggers). When
+// pattern ends with ".sql", compressed variants (*.sql.gz) are automatically
+// included so compressed dumps work without requiring the user to change the
+// pattern flag.
 func findFiles(dir, pattern string) ([]FileLoad, error) {
 	var files []FileLoad
 	seen := make(map[string]bool)
@@ -430,6 +555,25 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 			if !seen[p] {
 				seen[p] = true
 				files = append(files, FileLoad{Path: p, IsSchema: true})
+			}
+		}
+	}
+
+	// Object files load after all data. Collected before the data glob so the
+	// default "*.sql" pattern never picks them up as data.
+	for _, postPat := range []string{
+		"*-routines.sql", "*-routines.sql.gz",
+		"*-events.sql", "*-events.sql.gz",
+		"*-triggers.sql", "*-triggers.sql.gz",
+	} {
+		matches, err := filepath.Glob(filepath.Join(dir, postPat))
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range matches {
+			if !seen[p] {
+				seen[p] = true
+				files = append(files, FileLoad{Path: p, IsPost: true})
 			}
 		}
 	}
@@ -464,15 +608,23 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 		}
 	}
 
-	// Load order: database creation, then table definitions, then data.
+	// Load order: database creation, table definitions, data, then routines,
+	// events, and finally triggers (which must never precede their table's data).
 	rank := func(f FileLoad) int {
+		base := filepath.Base(f.Path)
 		switch {
-		case strings.Contains(filepath.Base(f.Path), "-schema-create"):
+		case strings.Contains(base, "-schema-create"):
 			return 0
 		case f.IsSchema:
 			return 1
-		default:
+		case !f.IsPost:
 			return 2
+		case strings.Contains(base, "-routines."):
+			return 3
+		case strings.Contains(base, "-events."):
+			return 4
+		default: // triggers
+			return 5
 		}
 	}
 	sort.Slice(files, func(i, j int) bool {
