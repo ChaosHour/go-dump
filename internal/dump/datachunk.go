@@ -67,10 +67,29 @@ func (dc *DataChunk) GetSampleSQL() string {
 	return fmt.Sprintf("SELECT * FROM %s LIMIT 1", dc.Task.Table.GetFullName())
 }
 
+// countingWriter tracks bytes written so Parse can cap INSERT statement size.
+type countingWriter struct {
+	w io.Writer
+	n uint64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += uint64(n)
+	return n, err
+}
+
 // Parse executes the chunk query and writes the resulting INSERT statements to w.
 // Callers stage the output in memory so a failed chunk can be retried without
 // duplicating rows already written to the dump file.
-func (dc *DataChunk) Parse(stmt *sql.Stmt, buffer io.Writer) error {
+//
+// Rows are grouped into multi-row INSERTs, split on whichever limit is hit
+// first: OutputChunkSize rows, or StatementSize bytes. The byte cap exists
+// because wide rows (large TEXT/BLOB columns) can push a row-count-only group
+// past the target server's max_allowed_packet, producing a dump that cannot
+// be restored anywhere. The cap is checked at row boundaries, so a statement
+// can exceed it by at most one row.
+func (dc *DataChunk) Parse(stmt *sql.Stmt, w io.Writer) error {
 	var rows *sql.Rows
 	var err error
 	if dc.IsSingleChunk {
@@ -87,6 +106,9 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, buffer io.Writer) error {
 		return fmt.Errorf("query chunk for %s: %w", dc.Task.Table.GetFullName(), err)
 	}
 	defer rows.Close()
+
+	buffer := &countingWriter{w: w}
+	maxStmtBytes := dc.Task.TaskManager.DumpOptions.StatementSize
 
 	tablename := dc.Task.Table.GetFullName()
 	if dc.IsSingleChunk {
@@ -112,6 +134,7 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, buffer io.Writer) error {
 
 	firstRow := true
 	var rowsNumber uint64
+	var stmtStart uint64 // buffer.n at the start of the current INSERT statement
 
 	for rows.Next() {
 		err = rows.Scan(buff...)
@@ -120,12 +143,17 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, buffer io.Writer) error {
 		}
 
 		if firstRow {
+			stmtStart = buffer.n
 			fmt.Fprintf(buffer, insertPrefix)
 			firstRow = false
 		} else {
 			rowsNumber++
-			if dc.Task.OutputChunkSize > 0 && rowsNumber%dc.Task.OutputChunkSize == 0 {
-				fmt.Fprintf(buffer, ");\n%s", insertPrefix)
+			splitOnRows := dc.Task.OutputChunkSize > 0 && rowsNumber%dc.Task.OutputChunkSize == 0
+			splitOnBytes := maxStmtBytes > 0 && buffer.n-stmtStart >= maxStmtBytes
+			if splitOnRows || splitOnBytes {
+				fmt.Fprintf(buffer, ");\n")
+				stmtStart = buffer.n
+				fmt.Fprintf(buffer, insertPrefix)
 			} else {
 				fmt.Fprintf(buffer, "),\n(")
 			}
