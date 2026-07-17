@@ -68,6 +68,7 @@ type TaskManager struct {
 	GetMasterStatus        bool
 	GetSlaveStatus         bool
 	Compress               bool
+	CompressFormat         string
 	CompressLevel          int
 	IsolationLevel         sql.IsolationLevel
 	mySQLHost              *MySQLHost
@@ -103,6 +104,7 @@ func NewTaskManager(
 		GetMasterStatus:        dumpOptions.GetMasterStatus,
 		GetSlaveStatus:         dumpOptions.GetSlaveStatus,
 		Compress:               dumpOptions.Compress,
+		CompressFormat:         dumpOptions.CompressFormat,
 		CompressLevel:          dumpOptions.CompressLevel,
 		IsolationLevel:         dumpOptions.IsolationLevel,
 		mySQLHost:              dumpOptions.MySQLHost,
@@ -328,7 +330,7 @@ func (tm *TaskManager) getSlaveData() {
 	for slaveData.Next() {
 		iterations++
 		if err := slaveData.Scan(out...); err != nil {
-			log.Fatalf(err.Error())
+			log.Fatalf("%s", err.Error())
 		}
 		fmt.Fprintln(buffer, "Connection Name: ", connectionName)
 		fmt.Fprintln(buffer, "  Relay Master Log File: ", relayMasterLogFile)
@@ -496,14 +498,14 @@ func (tm *TaskManager) WriteTablesSQL(addDropTable bool) {
 			log.Fatalf("Error creating definition buffer for %s: %s", task.Table.GetUnescapedFullName(), err.Error())
 		}
 		if !tm.SkipUseDatabase {
-			fmt.Fprintf(buffer, GetUseDatabaseSQL(task.Table.GetSchema())+";\n")
+			fmt.Fprintf(buffer, "%s;\n", GetUseDatabaseSQL(task.Table.GetSchema()))
 		}
 		fmt.Fprintf(buffer, "/*!40101 SET NAMES binary*/;\n")
 		fmt.Fprintf(buffer, "/*!40014 SET FOREIGN_KEY_CHECKS=0*/;\n")
 		if addDropTable {
-			fmt.Fprintf(buffer, GetDropTableIfExistSQL(task.Table.GetName())+";\n")
+			fmt.Fprintf(buffer, "%s;\n", GetDropTableIfExistSQL(task.Table.GetName()))
 		}
-		fmt.Fprintf(buffer, task.Table.CreateTableSQL+";\n")
+		fmt.Fprintf(buffer, "%s;\n", task.Table.CreateTableSQL)
 		if err := buffer.Close(); err != nil {
 			log.Fatalf("Error finalising definition file for %s: %v", task.Table.GetUnescapedFullName(), err)
 		}
@@ -888,6 +890,7 @@ func (tm *TaskManager) GetBufferOptions() *BufferOptions {
 	bufferOptions := new(BufferOptions)
 	if tm.Compress {
 		bufferOptions.Compress = true
+		bufferOptions.CompressFormat = tm.CompressFormat
 		bufferOptions.CompressLevel = tm.CompressLevel
 	}
 	bufferOptions.Type = BufferTypeFile

@@ -226,8 +226,9 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | `--events` | false | Dump events for the dumped schemas → `<schema>-events.sql`. |
 | `--skip-definer` | false | Strip `DEFINER=user@host` from trigger/routine/event definitions so they load on targets where the definer account does not exist. |
 | `--skip-use-database` | false | Omit `USE \`schema\`` statements from chunk files. |
-| `--compress` | false | Gzip-compress output files (`.sql.gz`). |
-| `--compress-level` | 1 | Compression level 1 (fastest) to 9 (smallest). |
+| `--compress` | false | Compress output files (see `--compress-format`). |
+| `--compress-format` | gzip | Compression format: `gzip` (`.sql.gz`) or `zstd` (`.sql.zst`). zstd compresses faster and smaller than gzip at comparable levels. |
+| `--compress-level` | 1 | Compression level: gzip 1 (fastest) to 9 (smallest); zstd 1 (fastest) to 19 (smallest). |
 | `--checksum` | false | Run `CHECKSUM TABLE` after the dump and write `checksums.txt`. |
 | `--get-master-status` | false | Record binlog file/position and GTID set in `master-data.sql` and `metadata.json`, and write the `change-replication-source.sql` setup template. |
 | `--get-slave-status` | false | Record replica status in `slave-data.sql`. |
@@ -264,7 +265,8 @@ chunk-size          = 50000
 output-chunk-size   = 5000
 destination         = /backups/mysql
 compress            = true
-compress-level      = 1
+compress-format     = zstd    # gzip (default) or zstd
+compress-level      = 3
 add-drop-table      = true
 get-master-status   = true
 checksum            = true
@@ -440,6 +442,7 @@ go-dump \
 ### Compressed dump
 
 ```bash
+# gzip (default format)
 go-dump \
   --ini-file /etc/go-dump/prod.ini \
   --databases myapp \
@@ -449,7 +452,22 @@ go-dump \
   --compress-level 1 \
   --execute
 # Output files: myapp.orders-thread0.sql.gz, myapp.orders-definition.sql.gz, etc.
+
+# zstd: faster and smaller than gzip; recommended for large dumps
+go-dump \
+  --ini-file /etc/go-dump/prod.ini \
+  --databases myapp \
+  --destination /backups/myapp \
+  --threads 8 \
+  --compress \
+  --compress-format zstd \
+  --compress-level 3 \
+  --execute
+# Output files: myapp.orders-thread0.sql.zst, myapp.orders-definition.sql.zst, etc.
 ```
+
+`go-load` detects `.gz` and `.zst` files automatically — no flag changes are
+needed on the restore side.
 
 ### Dump with triggers, stored routines, and events
 
@@ -620,6 +638,8 @@ ls /backups/myapp/myapp.orders-thread*.sql | xargs -P4 -I{} mysql -h target-host
 
 # Or restore compressed files
 ls /backups/myapp/*.sql.gz | xargs -P4 -I{} sh -c 'zcat {} | mysql -h target-host -u root -p myapp'
+# zstd-compressed files (requires the zstd CLI)
+ls /backups/myapp/*.sql.zst | xargs -P4 -I{} sh -c 'zstdcat {} | mysql -h target-host -u root -p myapp'
 ```
 
 For point-in-time recovery, apply binary logs from the position recorded in

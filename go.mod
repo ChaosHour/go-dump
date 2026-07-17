@@ -1,9 +1,10 @@
 module github.com/ChaosHour/go-dump
 
-go 1.23.2
+go 1.24
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
+	github.com/klauspost/compress v1.19.0
 	gopkg.in/ini.v1 v1.67.0
 )
 

@@ -9,24 +9,47 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/ChaosHour/go-dump/internal/log"
 )
 
-const BufferTypeGzipFile = "gzip"
 const BufferTypeFile = "file"
 
+// Compression formats accepted by --compress-format.
+const (
+	CompressFormatGzip = "gzip"
+	CompressFormatZstd = "zstd"
+)
+
+// CompressExtension returns the file extension for a compression format.
+func CompressExtension(format string) string {
+	if format == CompressFormatZstd {
+		return ".zst"
+	}
+	return ".gz"
+}
+
 type BufferOptions struct {
-	Compress      bool
-	CompressLevel int
-	Type          string
-	Path          string
+	Compress       bool
+	CompressFormat string
+	CompressLevel  int
+	Type           string
+	Path           string
+}
+
+// compressor is the writer interface shared by gzip.Writer and zstd.Encoder.
+type compressor interface {
+	Write(p []byte) (int, error)
+	Flush() error
+	Close() error
 }
 
 // Buffer is the default struct to write the data.
 type Buffer struct {
 	Type           string
 	Buffer         *bufio.Writer
-	GzipWriter     *gzip.Writer
+	Compressor     compressor
 	FileDescriptor *os.File
 }
 
@@ -38,10 +61,10 @@ func (b *Buffer) Flush() error {
 	if err := b.Buffer.Flush(); err != nil {
 		return err
 	}
-	// For gzip buffers, also flush the compressor so the data reaches the file
-	// descriptor rather than sitting in the gzip writer's internal state.
-	if b.Type == BufferTypeGzipFile {
-		return b.GzipWriter.Flush()
+	// For compressed buffers, also flush the compressor so the data reaches the
+	// file descriptor rather than sitting in the compressor's internal state.
+	if b.Compressor != nil {
+		return b.Compressor.Flush()
 	}
 	return nil
 }
@@ -50,40 +73,51 @@ func (b *Buffer) Close() error {
 	if err := b.Flush(); err != nil {
 		return err
 	}
-	switch b.Type {
-	case BufferTypeGzipFile:
-		if err := b.GzipWriter.Close(); err != nil {
+	if b.Compressor != nil {
+		if err := b.Compressor.Close(); err != nil {
 			return err
 		}
-		return b.FileDescriptor.Close()
-	case BufferTypeFile:
-		return b.FileDescriptor.Close()
 	}
-	return nil
+	return b.FileDescriptor.Close()
 }
 
 func NewBuffer(options *BufferOptions) (*Buffer, error) {
 	if options.Type == BufferTypeFile {
-		return NewFileBuffer(options.Path, options.Compress, options.CompressLevel), nil
+		return NewFileBuffer(options.Path, options.Compress, options.CompressFormat, options.CompressLevel), nil
 	}
 	return nil, errors.New("Buffer type " + options.Type + " not supported.")
 }
 
-func NewFileBuffer(fileName string, compress bool, compressLevel int) *Buffer {
-	if compress && !strings.HasSuffix(fileName, ".gz") {
-		fileName = fileName + ".gz"
+func NewFileBuffer(fileName string, compress bool, compressFormat string, compressLevel int) *Buffer {
+	ext := CompressExtension(compressFormat)
+	if compress && !strings.HasSuffix(fileName, ext) {
+		fileName = fileName + ext
 	}
 	fileDescriptor, err := os.Create(fileName)
 	if err != nil {
 		log.Fatalf("Error creating the file %s: %s", fileName, err.Error())
 	}
 	if compress {
-		gzipWriter, err := gzip.NewWriterLevel(fileDescriptor, compressLevel)
-		if err != nil {
-			log.Fatalf("Error getting gzip writer: %s", err.Error())
+		var cw compressor
+		switch compressFormat {
+		case CompressFormatZstd:
+			// EncoderLevelFromZstd maps the zstd CLI's 1-19 scale onto the
+			// library's speed presets.
+			zw, err := zstd.NewWriter(fileDescriptor,
+				zstd.WithEncoderLevel(zstd.EncoderLevelFromZstd(compressLevel)))
+			if err != nil {
+				log.Fatalf("Error getting zstd writer: %s", err.Error())
+			}
+			cw = zw
+		default:
+			gw, err := gzip.NewWriterLevel(fileDescriptor, compressLevel)
+			if err != nil {
+				log.Fatalf("Error getting gzip writer: %s", err.Error())
+			}
+			cw = gw
 		}
-		buffer := bufio.NewWriter(gzipWriter)
-		return &Buffer{Type: BufferTypeGzipFile, Buffer: buffer, GzipWriter: gzipWriter, FileDescriptor: fileDescriptor}
+		buffer := bufio.NewWriter(cw)
+		return &Buffer{Type: BufferTypeFile, Buffer: buffer, Compressor: cw, FileDescriptor: fileDescriptor}
 	}
 	buffer := bufio.NewWriter(fileDescriptor)
 	return &Buffer{Type: BufferTypeFile, Buffer: buffer, FileDescriptor: fileDescriptor}

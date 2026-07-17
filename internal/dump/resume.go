@@ -55,8 +55,8 @@ func applyResumeFilter(destDir string, tablesToParse map[string]bool) (map[strin
 }
 
 // cleanPartialFiles removes chunk files in destDir for the given "schema.table" keys.
-// It matches any file whose base name (without .sql or .sql.gz) starts with a table key,
-// covering: schema.table-threadN.sql, schema.table-definition.sql, schema.table.sql.
+// It matches any file whose base name (without .sql, .sql.gz, or .sql.zst) starts with a
+// table key, covering: schema.table-threadN.sql, schema.table-definition.sql, schema.table.sql.
 func cleanPartialFiles(destDir string, tables map[string]bool) {
 	entries, err := os.ReadDir(destDir)
 	if err != nil {
@@ -71,6 +71,7 @@ func cleanPartialFiles(destDir string, tables map[string]bool) {
 		name := entry.Name()
 		// Strip extensions to get the table-name prefix.
 		base := strings.TrimSuffix(name, ".gz")
+		base = strings.TrimSuffix(base, ".zst")
 		base = strings.TrimSuffix(base, ".sql")
 
 		for tableKey := range tables {

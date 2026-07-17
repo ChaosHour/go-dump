@@ -29,7 +29,7 @@ func printOption(w io.Writer, f *flag.Flag) {
 
 func PrintUsage(flags map[string]*flag.Flag) {
 	w := tabwriter.NewWriter(os.Stdout, 30, 0, 1, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--triggers] [--routines] [--events] [--skip-definer] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-level num] [--where str] [--ini-file str]")
+	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--triggers] [--routines] [--events] [--skip-definer] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-format str] [--compress-level num] [--where str] [--ini-file str]")
 	fmt.Fprintln(w, "go-dump dumps a database or a table from a MySQL server and creates SQL statements to recreate each table. One file per table per thread is written to the destination directory.")
 	fmt.Fprint(w, "Example: go-dump --destination /tmp/dbdump --databases mydb --mysql-user myuser --mysql-password password\n\n")
 	fmt.Fprint(w, "Options description\n\n")
@@ -37,7 +37,7 @@ func PrintUsage(flags map[string]*flag.Flag) {
 	fmt.Fprintln(w, "# General:")
 	for _, opt := range []string{"help", "dry-run", "execute", "debug", "quiet", "version",
 		"lock-tables", "lock-wait-timeout", "channel-buffer-size", "chunk-size", "tables-without-uniquekey",
-		"threads", "compress", "compress-level", "consistent", "isolation-level", "where", "ini-file"} {
+		"threads", "compress", "compress-format", "compress-level", "consistent", "isolation-level", "where", "ini-file"} {
 		printOption(w, flags[opt])
 	}
 	fmt.Fprintln(w, "\n# MySQL options:")
@@ -98,8 +98,9 @@ func main() {
 	flag.BoolVar(&dumpOptions.SkipDefiner, "skip-definer", false, "Strip DEFINER=... from trigger/routine/event definitions so they load where the definer account does not exist.")
 	flag.BoolVar(&dumpOptions.Checksum, "checksum", false, "Run CHECKSUM TABLE after dump and write checksums.txt.")
 	flag.BoolVar(&dumpOptions.Resume, "resume", false, "Resume a previous dump: skip completed tables and clean partial files.")
-	flag.BoolVar(&dumpOptions.Compress, "compress", false, "Compress output files with gzip.")
-	flag.IntVar(&dumpOptions.CompressLevel, "compress-level", 1, "Compression level: 1 (fastest) to 9 (smallest).")
+	flag.BoolVar(&dumpOptions.Compress, "compress", false, "Compress output files (see --compress-format).")
+	flag.StringVar(&dumpOptions.CompressFormat, "compress-format", "gzip", "Compression format: 'gzip' (.gz) or 'zstd' (.zst). zstd is faster and smaller; requires go-load from this repo or the zstd CLI to decompress.")
+	flag.IntVar(&dumpOptions.CompressLevel, "compress-level", 1, "Compression level: gzip 1 (fastest) to 9 (smallest); zstd 1 (fastest) to 19 (smallest).")
 	flag.BoolVar(&dumpOptions.TemporalOptions.Quiet, "quiet", false, "Suppress INFO messages.")
 	flag.StringVar(&dumpOptions.TemporalOptions.IsolationLevel, "isolation-level", "REPEATABLE READ", "Transaction isolation level. Use 'REPEATABLE READ' for a consistent backup.")
 	flag.BoolVar(&dumpOptions.Consistent, "consistent", true, "Require a consistent (point-in-time) backup.")
@@ -197,8 +198,17 @@ func main() {
 		dumpOptions.OutputChunkSize = dumpOptions.ChunkSize
 	}
 
-	if dumpOptions.CompressLevel < 1 || dumpOptions.CompressLevel > 9 {
-		log.Fatal("--compress-level must be between 1 and 9.")
+	switch dumpOptions.CompressFormat {
+	case dump.CompressFormatGzip:
+		if dumpOptions.CompressLevel < 1 || dumpOptions.CompressLevel > 9 {
+			log.Fatal("--compress-level must be between 1 and 9 for gzip.")
+		}
+	case dump.CompressFormatZstd:
+		if dumpOptions.CompressLevel < 1 || dumpOptions.CompressLevel > 19 {
+			log.Fatal("--compress-level must be between 1 and 19 for zstd.")
+		}
+	default:
+		log.Fatalf("--compress-format must be 'gzip' or 'zstd', got %q.", dumpOptions.CompressFormat)
 	}
 
 	if !dumpOptions.TemporalOptions.AllDatabases &&

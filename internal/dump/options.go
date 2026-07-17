@@ -20,6 +20,7 @@ type DumpOptions struct {
 	GetSlaveStatus        bool
 	SkipUseDatabase       bool
 	Compress              bool
+	CompressFormat        string // "gzip" or "zstd"
 	CompressLevel         int
 	IsolationLevel        sql.IsolationLevel
 	Consistent            bool
@@ -69,6 +70,7 @@ func GetDumpOptions() *DumpOptions {
 		GetSlaveStatus:        false,
 		SkipUseDatabase:       false,
 		Compress:              false,
+		CompressFormat:        CompressFormatGzip,
 		CompressLevel:         1,
 		IsolationLevel:        sql.LevelRepeatableRead,
 		Consistent:            true,

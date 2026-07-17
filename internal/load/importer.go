@@ -17,6 +17,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
+
 	"github.com/ChaosHour/go-dump/internal/log"
 	mysql "github.com/go-sql-driver/mysql"
 )
@@ -65,7 +67,7 @@ func (imp *Importer) ImportDirectory(ctx context.Context, dir, pattern string, l
 		return err
 	}
 	if len(files) == 0 {
-		return fmt.Errorf("no SQL files found in %s matching %q (or *.sql.gz variant)", dir, pattern)
+		return fmt.Errorf("no SQL files found in %s matching %q (or *.sql.gz / *.sql.zst variants)", dir, pattern)
 	}
 
 	// Schema files: serial, must complete before data workers start.
@@ -198,7 +200,7 @@ func (imp *Importer) ImportFile(ctx context.Context, path string) error {
 
 const maxRetries = 3
 
-// loadFile opens path (plain or .gz), acquires a dedicated connection,
+// loadFile opens path (plain, .gz, or .zst), acquires a dedicated connection,
 // sets session variables, and streams SQL statements one at a time.
 // Retries up to maxRetries times on transient MySQL connection errors.
 func (imp *Importer) loadFile(ctx context.Context, path string) error {
@@ -231,13 +233,21 @@ func (imp *Importer) doLoadFile(ctx context.Context, path string) error {
 	defer f.Close()
 
 	var underlying io.Reader = f
-	if strings.HasSuffix(path, ".gz") {
+	switch {
+	case strings.HasSuffix(path, ".gz"):
 		gz, err := gzip.NewReader(f)
 		if err != nil {
 			return fmt.Errorf("gzip: %w", err)
 		}
 		defer gz.Close()
 		underlying = gz
+	case strings.HasSuffix(path, ".zst"):
+		zr, err := zstd.NewReader(f)
+		if err != nil {
+			return fmt.Errorf("zstd: %w", err)
+		}
+		defer zr.Close()
+		underlying = zr
 	}
 
 	conn, err := imp.db.Conn(ctx)
@@ -534,9 +544,9 @@ func isRetryable(err error) bool {
 // findFiles returns all SQL files in dir: schema files first (database
 // schema-create files, then table definition files), then data files matching
 // pattern, then post-data object files (routines, events, triggers). When
-// pattern ends with ".sql", compressed variants (*.sql.gz) are automatically
-// included so compressed dumps work without requiring the user to change the
-// pattern flag.
+// pattern ends with ".sql", compressed variants (*.sql.gz, *.sql.zst) are
+// automatically included so compressed dumps work without requiring the user
+// to change the pattern flag.
 func findFiles(dir, pattern string) ([]FileLoad, error) {
 	var files []FileLoad
 	seen := make(map[string]bool)
@@ -544,8 +554,8 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 	// Always collect schema-create and definition files as schema (plain and
 	// compressed). Ordering between them is handled by the sort below.
 	for _, defPat := range []string{
-		"*-schema-create.sql", "*-schema-create.sql.gz",
-		"*-definition.sql", "*-definition.sql.gz",
+		"*-schema-create.sql", "*-schema-create.sql.gz", "*-schema-create.sql.zst",
+		"*-definition.sql", "*-definition.sql.gz", "*-definition.sql.zst",
 	} {
 		matches, err := filepath.Glob(filepath.Join(dir, defPat))
 		if err != nil {
@@ -562,9 +572,9 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 	// Object files load after all data. Collected before the data glob so the
 	// default "*.sql" pattern never picks them up as data.
 	for _, postPat := range []string{
-		"*-routines.sql", "*-routines.sql.gz",
-		"*-events.sql", "*-events.sql.gz",
-		"*-triggers.sql", "*-triggers.sql.gz",
+		"*-routines.sql", "*-routines.sql.gz", "*-routines.sql.zst",
+		"*-events.sql", "*-events.sql.gz", "*-events.sql.zst",
+		"*-triggers.sql", "*-triggers.sql.gz", "*-triggers.sql.zst",
 	} {
 		matches, err := filepath.Glob(filepath.Join(dir, postPat))
 		if err != nil {
@@ -580,10 +590,10 @@ func findFiles(dir, pattern string) ([]FileLoad, error) {
 
 	// Data files matching the user's pattern.
 	dataPatterns := []string{pattern}
-	// When pattern ends with ".sql" (the default), also check "*.sql.gz" so
-	// compressed dumps work without a flag change.
+	// When pattern ends with ".sql" (the default), also check "*.sql.gz" and
+	// "*.sql.zst" so compressed dumps work without a flag change.
 	if strings.HasSuffix(pattern, ".sql") {
-		dataPatterns = append(dataPatterns, pattern+".gz")
+		dataPatterns = append(dataPatterns, pattern+".gz", pattern+".zst")
 	}
 
 	for _, pat := range dataPatterns {

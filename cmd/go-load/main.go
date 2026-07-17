@@ -53,7 +53,7 @@ func main() {
 	flag.StringVar(&database, "database", "", "Target database name. If set, execute USE <db> on each connection instead of relying on USE statements in SQL files.")
 	flag.StringVar(&directory, "directory", "", "Directory containing SQL files to load")
 	flag.StringVar(&file, "file", "", "Single SQL file to load")
-	flag.StringVar(&pattern, "pattern", "*.sql", "File glob pattern for data files in --directory. Use '*.sql.gz' for compressed dumps.")
+	flag.StringVar(&pattern, "pattern", "*.sql", "File glob pattern for data files in --directory. The default also picks up *.sql.gz and *.sql.zst compressed dumps automatically.")
 	flag.IntVar(&workers, "workers", 4, "Number of parallel workers for data files")
 	flag.BoolVar(&dataOnly, "data-only", false, "Skip schema (definition) files; load data files only")
 	flag.BoolVar(&skipBinlog, "skip-binlog", false, "Run SET SQL_LOG_BIN=0 on every load connection so the restore is not written to the target's binlog or replicated downstream. Requires SUPER or SYSTEM_VARIABLES_ADMIN.")
