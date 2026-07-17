@@ -135,6 +135,10 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 			do.Resume, errBool = strconv.ParseBool(key.Value())
 		case "compress":
 			do.Compress, errBool = strconv.ParseBool(key.Value())
+		case "compress-format":
+			if key.Value() != "" {
+				do.CompressFormat = key.Value()
+			}
 		case "compress-level":
 			if key.Value() != "" {
 				do.CompressLevel, errInt = strconv.Atoi(key.Value())

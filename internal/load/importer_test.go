@@ -228,8 +228,8 @@ func TestFindFiles_BasicSQL(t *testing.T) {
 
 func TestFindFiles_CompressedAutoDetect(t *testing.T) {
 	dir := t.TempDir()
-	touch(t, dir, "mydb.users-definition.sql")   // schema: plain
-	touch(t, dir, "mydb.users-thread0.sql.gz")   // data: compressed
+	touch(t, dir, "mydb.users-definition.sql")     // schema: plain
+	touch(t, dir, "mydb.users-thread0.sql.gz")     // data: compressed
 	touch(t, dir, "mydb.orders-definition.sql.gz") // schema: compressed
 
 	// Default pattern "*.sql" should still find *.sql.gz data files.
@@ -251,6 +251,35 @@ func TestFindFiles_CompressedAutoDetect(t *testing.T) {
 	}
 	if data != 1 {
 		t.Errorf("expected 1 compressed data file, got %d", data)
+	}
+}
+
+func TestFindFiles_ZstdAutoDetect(t *testing.T) {
+	dir := t.TempDir()
+	touch(t, dir, "mydb.users-definition.sql.zst") // schema: zstd
+	touch(t, dir, "mydb.users-thread0.sql.zst")    // data: zstd
+	touch(t, dir, "mydb.orders-thread0.sql.gz")    // data: gzip (mixed dump)
+	touch(t, dir, "mydb.orders-definition.sql")    // schema: plain
+
+	// Default pattern "*.sql" should still find *.sql.zst files.
+	files, err := findFiles(dir, "*.sql")
+	if err != nil {
+		t.Fatalf("findFiles: %v", err)
+	}
+
+	var schemas, data int
+	for _, f := range files {
+		if f.IsSchema {
+			schemas++
+		} else {
+			data++
+		}
+	}
+	if schemas != 2 {
+		t.Errorf("expected 2 schema files (zstd + plain), got %d", schemas)
+	}
+	if data != 2 {
+		t.Errorf("expected 2 data files (zstd + gzip), got %d", data)
 	}
 }
 

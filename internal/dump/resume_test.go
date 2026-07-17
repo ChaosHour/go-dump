@@ -20,6 +20,7 @@ func TestCleanPartialFiles(t *testing.T) {
 		"mydb.events-thread1.sql",
 		"mydb.events-definition.sql",
 		"mydb.events-thread0.sql.gz",
+		"mydb.events-thread1.sql.zst",
 	}
 
 	for _, name := range append(keepFiles, removeFiles...) {

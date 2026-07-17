@@ -144,7 +144,7 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, w io.Writer) error {
 
 		if firstRow {
 			stmtStart = buffer.n
-			fmt.Fprintf(buffer, insertPrefix)
+			fmt.Fprintf(buffer, "%s", insertPrefix)
 			firstRow = false
 		} else {
 			rowsNumber++
@@ -153,7 +153,7 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, w io.Writer) error {
 			if splitOnRows || splitOnBytes {
 				fmt.Fprintf(buffer, ");\n")
 				stmtStart = buffer.n
-				fmt.Fprintf(buffer, insertPrefix)
+				fmt.Fprintf(buffer, "%s", insertPrefix)
 			} else {
 				fmt.Fprintf(buffer, "),\n(")
 			}
