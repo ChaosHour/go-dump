@@ -132,3 +132,147 @@ func TestEscapeSQLString(t *testing.T) {
 		}
 	}
 }
+
+// --- StartReplication pure helpers ---
+
+func TestChooseReplMode(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested string
+		gtidSet   string
+		gtidOn    bool
+		binlog    string
+		want      string
+		wantErr   bool
+	}{
+		{"auto prefers gtid", "auto", "uuid:1-5", true, "b.1", "gtid", false},
+		{"auto falls back when gtid_mode off", "auto", "uuid:1-5", false, "b.1", "file-pos", false},
+		{"auto falls back when no gtid set", "auto", "", true, "b.1", "file-pos", false},
+		{"auto with nothing usable", "auto", "", false, "", "", true},
+		{"explicit gtid ok", "gtid", "uuid:1-5", true, "", "gtid", false},
+		{"explicit gtid without set", "gtid", "", true, "b.1", "", true},
+		{"explicit gtid mode off", "gtid", "uuid:1-5", false, "b.1", "", true},
+		{"explicit file-pos ok", "file-pos", "uuid:1-5", true, "b.1", "file-pos", false},
+		{"explicit file-pos without binlog", "file-pos", "uuid:1-5", true, "", "", true},
+		{"bogus mode", "chaos", "uuid:1-5", true, "b.1", "", true},
+	}
+	for _, c := range cases {
+		got, err := chooseReplMode(c.requested, c.gtidSet, c.gtidOn, c.binlog)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: expected error, got mode %q", c.name, got)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: unexpected error: %v", c.name, err)
+		} else if got != c.want {
+			t.Errorf("%s: mode = %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
+func TestBuildChangeSourceSQL_ModernGTID(t *testing.T) {
+	info := ReplicationInfo{
+		SourceHost: "primary1", SourcePort: 3306,
+		ReplUser: "repl", ReplPassword: "s'cret",
+		BinlogFile: "b.1", BinlogPos: 4,
+	}
+	stmt, redacted := buildChangeSourceSQL([3]int{8, 0, 43}, info, "u:1-5", "gtid",
+		StartOptions{SourceSSL: true, GetSourcePublicKey: true})
+
+	for _, want := range []string{
+		"CHANGE REPLICATION SOURCE TO",
+		"SOURCE_HOST = 'primary1'",
+		"SOURCE_PORT = 3306",
+		"SOURCE_USER = 'repl'",
+		`SOURCE_PASSWORD = 's\'cret'`,
+		"SOURCE_SSL = 1",
+		"GET_SOURCE_PUBLIC_KEY = 1",
+		"SOURCE_AUTO_POSITION = 1",
+	} {
+		if !strings.Contains(stmt, want) {
+			t.Errorf("stmt missing %q:\n%s", want, stmt)
+		}
+	}
+	if strings.Contains(stmt, "SOURCE_LOG_FILE") {
+		t.Error("gtid mode must not set SOURCE_LOG_FILE")
+	}
+	if strings.Contains(redacted, "cret") || !strings.Contains(redacted, "<redacted>") {
+		t.Errorf("redacted statement leaks the password:\n%s", redacted)
+	}
+}
+
+func TestBuildChangeSourceSQL_LegacyFilePos(t *testing.T) {
+	info := ReplicationInfo{
+		SourceHost: "primary1",
+		ReplUser:   "repl", ReplPassword: "x",
+		BinlogFile: "mysql-bin.000007", BinlogPos: 98765,
+	}
+	stmt, _ := buildChangeSourceSQL([3]int{5, 7, 44}, info, "", "file-pos",
+		StartOptions{GetSourcePublicKey: true})
+
+	for _, want := range []string{
+		"CHANGE MASTER TO",
+		"MASTER_HOST = 'primary1'",
+		"MASTER_PORT = 3306", // default port
+		"MASTER_LOG_FILE = 'mysql-bin.000007'",
+		"MASTER_LOG_POS = 98765",
+	} {
+		if !strings.Contains(stmt, want) {
+			t.Errorf("stmt missing %q:\n%s", want, stmt)
+		}
+	}
+	// 5.7 has no caching_sha2_password: the public-key clause must be omitted.
+	if strings.Contains(stmt, "PUBLIC_KEY") {
+		t.Errorf("5.7 statement must not contain a public-key clause:\n%s", stmt)
+	}
+	if strings.Contains(stmt, "SOURCE_") {
+		t.Errorf("5.7 statement must use MASTER_* keywords only:\n%s", stmt)
+	}
+}
+
+func TestBuildChangeSourceSQL_LegacyKeywordsUpTo8022(t *testing.T) {
+	info := ReplicationInfo{SourceHost: "h", ReplUser: "r", BinlogFile: "b.1", BinlogPos: 4}
+	stmt, _ := buildChangeSourceSQL([3]int{8, 0, 22}, info, "u:1", "gtid",
+		StartOptions{GetSourcePublicKey: true})
+	if !strings.Contains(stmt, "CHANGE MASTER TO") || !strings.Contains(stmt, "MASTER_AUTO_POSITION = 1") {
+		t.Errorf("8.0.22 must use legacy CHANGE MASTER syntax:\n%s", stmt)
+	}
+	if !strings.Contains(stmt, "GET_MASTER_PUBLIC_KEY = 1") {
+		t.Errorf("8.0.22 supports GET_MASTER_PUBLIC_KEY:\n%s", stmt)
+	}
+}
+
+func TestAssessReplicaStatus(t *testing.T) {
+	healthy, hardErr, _ := assessReplicaStatus(map[string]string{
+		"REPLICA_IO_RUNNING": "Yes", "REPLICA_SQL_RUNNING": "Yes",
+		"LAST_IO_ERROR": "", "LAST_SQL_ERROR": "",
+	})
+	if !healthy || hardErr != "" {
+		t.Errorf("both Yes should be healthy, got healthy=%v err=%q", healthy, hardErr)
+	}
+
+	healthy, hardErr, state := assessReplicaStatus(map[string]string{
+		"REPLICA_IO_RUNNING": "Connecting", "REPLICA_SQL_RUNNING": "Yes",
+	})
+	if healthy || hardErr != "" || !strings.Contains(state, "Connecting") {
+		t.Errorf("Connecting should be still-starting, got healthy=%v err=%q state=%q", healthy, hardErr, state)
+	}
+
+	_, hardErr, _ = assessReplicaStatus(map[string]string{
+		"REPLICA_IO_RUNNING": "No", "REPLICA_SQL_RUNNING": "No",
+		"LAST_IO_ERROR": "Access denied for user 'repl'",
+	})
+	if !strings.Contains(hardErr, "Access denied") {
+		t.Errorf("Last_IO_Error should surface as hard error, got %q", hardErr)
+	}
+
+	// Legacy column names (5.7 / pre-8.0.22).
+	healthy, _, _ = assessReplicaStatus(map[string]string{
+		"SLAVE_IO_RUNNING": "Yes", "SLAVE_SQL_RUNNING": "Yes",
+	})
+	if !healthy {
+		t.Error("legacy Slave_* columns should be recognised")
+	}
+}

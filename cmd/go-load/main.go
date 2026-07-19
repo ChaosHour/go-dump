@@ -40,6 +40,10 @@ func main() {
 		verify        bool
 		resume        bool
 		showRepl      bool
+		startRepl     bool
+		replMode      string
+		sourceSSL     bool
+		getSourcePubK bool
 		sourceHost    string
 		sourcePort    int
 		replUser      string
@@ -67,10 +71,14 @@ func main() {
 	flag.BoolVar(&verify, "verify", false, "Verify checksums after loading (requires checksums.txt in --directory)")
 	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json and continue partially-loaded data files after their last committed statement. --workers may differ between runs.")
 	flag.BoolVar(&showRepl, "show-replication", false, "Print ready-to-run replication setup SQL (GTID AUTO_POSITION and binlog file/position) parsed from the dump's metadata.json in --directory, then exit. Connects to nothing and executes nothing.")
-	flag.StringVar(&sourceHost, "source-host", "", "With --show-replication: source host for the statements (default: mysql_host from metadata.json — override when the replica reaches the source by another address)")
-	flag.IntVar(&sourcePort, "source-port", 0, "With --show-replication: source port (default: mysql_port from metadata.json, else 3306)")
-	flag.StringVar(&replUser, "repl-user", "", "With --show-replication: replication user for the statements (default: <repl_user> placeholder)")
-	flag.StringVar(&replPassword, "repl-password", "", "With --show-replication: replication password (or set GOLOAD_REPL_PASSWORD env var; default: <repl_password> placeholder)")
+	flag.BoolVar(&startRepl, "start-replication", false, "After the load, configure the target as a replica of the dump source (CHANGE REPLICATION SOURCE from metadata.json coordinates), START REPLICA, and wait for both threads to come up. Requires --repl-user. GTID mode requires gtid_executed to equal the dump's set — pair with --set-gtid-purged.")
+	flag.StringVar(&replMode, "replication-mode", "auto", "With --start-replication: auto (GTID auto-position when the dump has a GTID set and the target has gtid_mode=ON, else binlog file/position), gtid, or file-pos")
+	flag.BoolVar(&sourceSSL, "source-ssl", false, "With --start-replication: add SOURCE_SSL=1 (encrypt the replication connection)")
+	flag.BoolVar(&getSourcePubK, "get-source-public-key", false, "With --start-replication: add GET_SOURCE_PUBLIC_KEY=1 — needed when the replication user authenticates with caching_sha2_password and the connection is not TLS")
+	flag.StringVar(&sourceHost, "source-host", "", "With --show-replication/--start-replication: source host (default: mysql_host from metadata.json — override when the replica reaches the source by another address)")
+	flag.IntVar(&sourcePort, "source-port", 0, "With --show-replication/--start-replication: source port (default: mysql_port from metadata.json, else 3306)")
+	flag.StringVar(&replUser, "repl-user", "", "With --show-replication/--start-replication: replication user (required for --start-replication; <repl_user> placeholder in --show-replication output)")
+	flag.StringVar(&replPassword, "repl-password", "", "With --show-replication/--start-replication: replication password (or set GOLOAD_REPL_PASSWORD env var)")
 	flag.BoolVar(&quiet, "quiet", false, "Suppress INFO messages")
 	flag.BoolVar(&debug, "debug", false, "Print debug information")
 	flag.StringVar(&iniFile, "ini-file", "", "INI configuration file (supports [client] and [go-load] sections)")
@@ -111,6 +119,17 @@ func main() {
 	if setGtidPurged && directory == "" {
 		log.Fatal("--set-gtid-purged requires --directory (the GTID set comes from the dump's metadata.json).")
 	}
+	if startRepl && directory == "" {
+		log.Fatal("--start-replication requires --directory (coordinates come from the dump's metadata.json).")
+	}
+	if startRepl && replUser == "" {
+		log.Fatal("--start-replication requires --repl-user (an account on the source with REPLICATION SLAVE).")
+	}
+	if replPassword == "" {
+		if env := os.Getenv("GOLOAD_REPL_PASSWORD"); env != "" {
+			replPassword = env
+		}
+	}
 
 	// --show-replication: parse metadata.json, print the setup SQL, exit.
 	// Read-only — no MySQL connection, no load. Output goes to stdout so it
@@ -125,11 +144,6 @@ func main() {
 		}
 		if meta.Status != "complete" {
 			log.Warningf("Dump status is %q, not \"complete\" — its coordinates may not describe a restorable dump.", meta.Status)
-		}
-		if replPassword == "" {
-			if env := os.Getenv("GOLOAD_REPL_PASSWORD"); env != "" {
-				replPassword = env
-			}
 		}
 		info := load.ReplicationInfo{
 			SourceHost:   sourceHost,
@@ -201,6 +215,15 @@ func main() {
 				log.Fatal("--set-gtid-purged: metadata.json has no gtid_set — the dump was taken without --get-master-status, or the source has no GTIDs.")
 			}
 		}
+		if startRepl {
+			// Same principle: refuse before the load starts, not after hours of it.
+			if metaErr != nil {
+				log.Fatalf("--start-replication: cannot read metadata.json: %v", metaErr)
+			}
+			if meta.GTIDSet == "" && meta.BinlogFile == "" {
+				log.Fatal("--start-replication: metadata.json has no replication coordinates — the dump was taken without --get-master-status.")
+			}
+		}
 
 		var ls *load.LoadState
 		if resume {
@@ -226,6 +249,35 @@ func main() {
 		if setGtidPurged {
 			log.Info("Applying the dump's GTID set to the target (--set-gtid-purged)...")
 			if err := load.ApplyGTIDPurged(ctx, db, meta.GTIDSet, force); err != nil {
+				log.Fatalf("%v", err)
+			}
+		}
+
+		if startRepl {
+			log.Info("Configuring and starting replication on the target (--start-replication)...")
+			info := load.ReplicationInfo{
+				SourceHost:   sourceHost,
+				SourcePort:   sourcePort,
+				ReplUser:     replUser,
+				ReplPassword: replPassword,
+				BinlogFile:   meta.BinlogFile,
+				BinlogPos:    meta.BinlogPosition,
+				GTIDSet:      meta.GTIDSet,
+			}
+			if info.SourceHost == "" {
+				info.SourceHost = meta.MySQLHost
+				log.Warningf("--source-host not given — using mysql_host from metadata.json (%s). "+
+					"That is the address the DUMP used; override it if the replica reaches the source differently.", info.SourceHost)
+			}
+			if info.SourcePort == 0 {
+				info.SourcePort = meta.MySQLPort
+			}
+			if err := load.StartReplication(ctx, db, info, load.StartOptions{
+				Mode:               replMode,
+				SourceSSL:          sourceSSL,
+				GetSourcePublicKey: getSourcePubK,
+				Force:              force,
+			}); err != nil {
 				log.Fatalf("%v", err)
 			}
 		}
