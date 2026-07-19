@@ -655,6 +655,62 @@ never fire while the data is being loaded. go-load understands the
 go-load --host target-host --user root --password ... --directory /backups/myapp --workers 4 --verify
 ```
 
+### go-load flags
+
+Connection:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | localhost | Target MySQL host. |
+| `--port` | 3306 | Target MySQL port. |
+| `--user` | root | Target MySQL user. |
+| `--password` | — | Target MySQL password (or set `GOLOAD_PASSWORD` — keeps it out of shell history). |
+| `--socket` | — | Unix socket path (overrides `--host`/`--port`). |
+| `--database` | — | Run `USE <db>` on every connection instead of relying on `USE` statements in the files (pairs with dumps taken with `--skip-use-database`). |
+| `--ini-file` | — | INI file with connection settings (`[client]` and `[go-load]` sections). Flags win over INI values. |
+
+What to load:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--directory` | — | Directory of dump files. Loads in dependency order: schema-create → table definitions → data (parallel) → routines → events → triggers. |
+| `--file` | — | Load a single SQL file instead of a directory. |
+| `--pattern` | `*.sql` | Glob for data files in `--directory`. The default also picks up `*.sql.gz` / `*.sql.zst` automatically. |
+| `--data-only` | false | Skip schema and post-data (trigger/routine/event) files; load data files only. |
+
+Execution and safety:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--workers` | 4 | Parallel workers for data files. May change freely between resumed runs. |
+| `--resume` | false | Skip files recorded in `load-state.json` and continue partially-loaded data files after their last committed statement. Cheap on the first run — pass it always. |
+| `--verify` | false | After loading, compare `CHECKSUM TABLE` on the target against the dump's `checksums.txt`. |
+| `--skip-binlog` | false | `SET SQL_LOG_BIN=0` on every load connection: the restore is invisible to the target's binlog, downstream replicas, and `gtid_executed`. Requires `SUPER`/`SYSTEM_VARIABLES_ADMIN` (not granted on Cloud SQL/RDS). |
+| `--force` | false | Allow acting on a configured-but-**stopped** replication channel, and (with `--set-gtid-purged`) allow the destructive `RESET MASTER` / `RESET BINARY LOGS AND GTIDS` when `gtid_executed` is a non-empty subset of the dump's set. Never overrides the errant-transaction or running-channel gates. |
+
+Replication (details in [Replication and GTIDs](#replication-and-gtids)):
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--set-gtid-purged` | false | After the load, seed the target's `gtid_purged` from the dump's GTID set so it can use `SOURCE_AUTO_POSITION=1`. Guarded: refuses running channels, errant transactions, and non-empty GTID state without `--force`. |
+| `--show-replication` | false | Print ready-to-run replication SQL parsed from `metadata.json`, then exit. Read-only — connects to nothing; stdout is pipeable into `mysql`. |
+| `--start-replication` | false | After the load, run `CHANGE REPLICATION SOURCE` + `START REPLICA` on the target and wait (≤15s) for both threads to come up; thread errors (bad credentials, missing binlogs) are hard errors. Requires `--repl-user`. |
+| `--replication-mode` | auto | `auto` (GTID auto-position when the dump has a GTID set and the target has `gtid_mode=ON`, else file/position), `gtid`, or `file-pos`. |
+| `--source-host` | metadata | Source host for replication (default `mysql_host` from `metadata.json` — override when the replica reaches the source by a different address than the dump used). |
+| `--source-port` | metadata | Source port (default `mysql_port` from `metadata.json`, else 3306). |
+| `--repl-user` | — | Replication account on the source (needs `REPLICATION SLAVE`). |
+| `--repl-password` | — | Replication password (or `GOLOAD_REPL_PASSWORD`). Redacted from all logged statements. |
+| `--source-ssl` | false | Add `SOURCE_SSL=1` — encrypt the replication connection. |
+| `--get-source-public-key` | false | Add `GET_SOURCE_PUBLIC_KEY=1` — required when the replication user authenticates with `caching_sha2_password` (the 8.0+ default) over a non-TLS connection. Omitted automatically on pre-8.0.4 targets. |
+
+Logging:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--quiet` | false | Suppress INFO messages. |
+| `--debug` | false | Debug-level logging. |
+| `--version` | false | Print version and exit. |
+
 With standard MySQL tooling instead:
 
 ```bash
@@ -783,22 +839,28 @@ script with the captured coordinates already filled in (GTID auto-position,
 5.7 syntax, and file/position variants). go-load never executes it; it is for
 you.
 
-Restore onto the new replica, then configure replication:
+Restore onto the new replica and start replication — **one command**:
 
 ```bash
-# 1. Load the data and hand over the GTID state in one step:
-#    --skip-binlog     keeps the load out of the replica's own GTID history
-#    --set-gtid-purged sets gtid_purged to the dump's snapshot GTID set
-#                      (from metadata.json), with safety checks — it refuses
-#                      on running replicas and on errant transactions.
+#  --skip-binlog        keeps the load out of the replica's own GTID history
+#  --set-gtid-purged    sets gtid_purged to the dump's snapshot GTID set
+#                       (from metadata.json), with safety checks — it refuses
+#                       on running replicas and on errant transactions
+#  --start-replication  CHANGE REPLICATION SOURCE + START REPLICA, then waits
+#                       for both threads to come up healthy
 go-load --host replica1 --user root --password ... \
-  --directory /backups/seed --workers 8 --verify \
-  --skip-binlog --set-gtid-purged
+  --directory /backups/seed --workers 8 --resume --verify \
+  --skip-binlog --set-gtid-purged \
+  --start-replication --source-host primary1.db.internal \
+  --repl-user repl --repl-password 'secret'
 ```
 
+Prefer to run the final step yourself? Drop `--start-replication` and either
+run the SQL printed by `go-load --show-replication` (coordinates parsed from
+`metadata.json`, pipeable into `mysql`) or edit the dump's
+`change-replication-source.sql` template by hand:
+
 ```sql
--- 2. Point the replica at the primary: edit SOURCE_USER / SOURCE_PASSWORD in
---    the dump's change-replication-source.sql and run it, or by hand:
 CHANGE REPLICATION SOURCE TO
   SOURCE_HOST = 'primary1.db.internal',
   SOURCE_PORT = 3306,
@@ -807,7 +869,6 @@ CHANGE REPLICATION SOURCE TO
   SOURCE_AUTO_POSITION = 1;         -- MySQL 8.0.23+; use CHANGE MASTER TO / MASTER_AUTO_POSITION=1 on 5.7
 START REPLICA;                      -- START SLAVE on 5.7
 
--- 3. Verify
 SHOW REPLICA STATUS\G               -- Replica_IO_Running / Replica_SQL_Running: Yes
 ```
 
