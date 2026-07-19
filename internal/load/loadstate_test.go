@@ -103,6 +103,77 @@ func TestLoadState_Len(t *testing.T) {
 	}
 }
 
+func TestProgress_SetGetPersist(t *testing.T) {
+	dir := t.TempDir()
+	ls, _ := NewLoadState(dir)
+
+	if got := ls.Progress("a.sql"); got != 0 {
+		t.Errorf("Progress before Set = %d, want 0", got)
+	}
+	if err := ls.SetProgress("a.sql", 42); err != nil {
+		t.Fatalf("SetProgress: %v", err)
+	}
+	if got := ls.Progress("a.sql"); got != 42 {
+		t.Errorf("Progress = %d, want 42", got)
+	}
+
+	// A new state loaded from disk must see the partial progress.
+	ls2, err := NewLoadState(dir)
+	if err != nil {
+		t.Fatalf("NewLoadState (resume): %v", err)
+	}
+	if got := ls2.Progress("a.sql"); got != 42 {
+		t.Errorf("Progress after reload = %d, want 42", got)
+	}
+}
+
+func TestMark_ClearsProgress(t *testing.T) {
+	dir := t.TempDir()
+	ls, _ := NewLoadState(dir)
+
+	_ = ls.SetProgress("a.sql", 10)
+	if err := ls.Mark("a.sql"); err != nil {
+		t.Fatalf("Mark: %v", err)
+	}
+	if got := ls.Progress("a.sql"); got != 0 {
+		t.Errorf("Progress after Mark = %d, want 0", got)
+	}
+
+	ls2, err := NewLoadState(dir)
+	if err != nil {
+		t.Fatalf("NewLoadState (resume): %v", err)
+	}
+	if !ls2.HasFile("a.sql") {
+		t.Error("a.sql should be complete after reload")
+	}
+	if got := ls2.Progress("a.sql"); got != 0 {
+		t.Errorf("Progress after reload = %d, want 0", got)
+	}
+}
+
+func TestNewLoadState_OldFormatWithoutProgress(t *testing.T) {
+	// load-state.json written by a previous go-load version has no
+	// file_progress key — it must still load, with zero progress everywhere.
+	dir := t.TempDir()
+	old := `{"start_time":"2026-01-01T00:00:00Z","completed_files":["a.sql"]}`
+	if err := os.WriteFile(filepath.Join(dir, "load-state.json"), []byte(old), 0644); err != nil {
+		t.Fatal(err)
+	}
+	ls, err := NewLoadState(dir)
+	if err != nil {
+		t.Fatalf("NewLoadState: %v", err)
+	}
+	if !ls.HasFile("a.sql") {
+		t.Error("a.sql should be complete")
+	}
+	if got := ls.Progress("b.sql"); got != 0 {
+		t.Errorf("Progress = %d, want 0", got)
+	}
+	if err := ls.SetProgress("b.sql", 3); err != nil {
+		t.Fatalf("SetProgress on old-format state: %v", err)
+	}
+}
+
 func TestNewLoadState_CorruptFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "load-state.json"), []byte("not-json"), 0644); err != nil {

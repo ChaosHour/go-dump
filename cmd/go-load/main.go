@@ -60,7 +60,7 @@ func main() {
 	flag.BoolVar(&setGtidPurged, "set-gtid-purged", false, "After the load, set the target's gtid_purged to the dump's captured GTID set (from metadata.json) so it can replicate with SOURCE_AUTO_POSITION=1. Refuses on active replicas or errant transactions.")
 	flag.BoolVar(&force, "force", false, "With --set-gtid-purged: allow acting on a stopped replication channel, and allow RESET MASTER / RESET BINARY LOGS AND GTIDS when the target's gtid_executed is non-empty (destroys the target's binlog history).")
 	flag.BoolVar(&verify, "verify", false, "Verify checksums after loading (requires checksums.txt in --directory)")
-	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json")
+	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json and continue partially-loaded data files after their last committed statement. --workers may differ between runs.")
 	flag.BoolVar(&quiet, "quiet", false, "Suppress INFO messages")
 	flag.BoolVar(&debug, "debug", false, "Print debug information")
 	flag.StringVar(&iniFile, "ini-file", "", "INI configuration file (supports [client] and [go-load] sections)")

@@ -16,6 +16,7 @@ per thread with a consistent, point-in-time snapshot using InnoDB MVCC — simil
 - [Common examples](#common-examples)
 - [Output files](#output-files)
 - [Restoring](#restoring)
+- [Resuming an interrupted dump or load](#resuming-an-interrupted-dump-or-load)
 - [Replication and GTIDs](#replication-and-gtids)
 - [Limitations](#limitations)
 - [Required privileges](#required-privileges)
@@ -158,6 +159,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 |------|---------|-------------|
 | `--dry-run` | false | Calculate chunk counts per table and print a summary. No files written. |
 | `--execute` | false | Run the dump. Mutually exclusive with `--dry-run`. |
+| `--resume` | false | Resume an interrupted dump into the same `--destination`: tables recorded as `done` in `metadata.json` are skipped, partial files from interrupted tables are removed and those tables re-dumped. `--threads` may differ from the original run. See [Resuming](#resuming-an-interrupted-dump-or-load). |
 | `--version` | false | Print version and exit. |
 | `--help` | false | Print usage and exit. |
 
@@ -523,6 +525,31 @@ Progress output (every 5 seconds):
 2026-06-10 14:02:20 INFO Progress: 521/1700 (30.6%) | Rate: 14.1 chunks/s | ETA: ~1m22s
 ```
 
+### Resume an interrupted dump
+
+A dump killed mid-run (network drop, OOM, operator Ctrl-C) restarts from
+where it left off — completed tables are never re-read:
+
+```bash
+# Original run dies partway through:
+go-dump --ini-file /etc/go-dump/prod.ini \
+  --databases myapp --destination /backups/myapp --threads 4 --execute
+
+# Same destination + --resume. Thread count can change freely.
+go-dump --ini-file /etc/go-dump/prod.ini \
+  --databases myapp --destination /backups/myapp --threads 8 --resume --execute
+```
+
+```
+INFO Resume: skipping completed table myapp.customers
+INFO Resume: removing partial file myapp.orders-thread0.sql
+INFO Resume: 12 table(s) already complete, 3 to dump this run.
+WARNING Resume: tables dumped in this run use a NEW snapshot — the combined dump is not consistent to a single point in time.
+```
+
+See [Resuming an interrupted dump or load](#resuming-an-interrupted-dump-or-load)
+for how state is tracked and the consistency caveat.
+
 ### Cloud SQL (on-prem → Cloud SQL via private IP)
 
 ```bash
@@ -551,6 +578,7 @@ A dump of `myapp.orders` with 4 threads produces:
 ├── change-replication-source.sql          # ready-to-edit replica setup script (--get-master-status)
 ├── slave-data.sql                         # replica status (--get-slave-status)
 ├── checksums.txt                          # CHECKSUM TABLE results (--checksum)
+├── load-state.json                        # written by go-load --resume (files + statements loaded)
 ├── myapp-schema-create.sql                # CREATE DATABASE IF NOT EXISTS (one per schema)
 ├── myapp.orders-definition.sql            # CREATE TABLE statement
 ├── myapp.orders-thread0.sql               # rows assigned to worker 0
@@ -644,6 +672,65 @@ ls /backups/myapp/*.sql.zst | xargs -P4 -I{} sh -c 'zstdcat {} | mysql -h target
 
 For point-in-time recovery, apply binary logs from the position recorded in
 `master-data.sql` (or `metadata.json` `binlog_file`/`binlog_position`).
+
+## Resuming an interrupted dump or load
+
+Both tools resume interrupted runs the way `mysqlsh` does with its progress
+file — and the thread/worker count may change freely between the original run
+and the resumed one.
+
+### go-dump --resume
+
+State lives in the dump's own `metadata.json` (each table is `pending`,
+`in_progress`, or `done`). On `--resume` into the same `--destination`:
+
+- tables recorded as `done` are skipped entirely;
+- partial chunk files from interrupted tables are deleted and those tables
+  re-dumped from scratch on a fresh snapshot;
+- the resumed run's `metadata.json` and `checksums.txt` still describe the
+  **whole** dump set on disk.
+
+```bash
+go-dump ... --destination /backups/myapp --threads 8 --resume --execute
+```
+
+> **Consistency caveat:** tables dumped by the resumed run use a **new**
+> snapshot, so the combined dump is not consistent to a single point in time
+> (go-dump warns at runtime). For replica seeding with GTIDs, take a fresh
+> full dump instead — the recorded GTID set only matches a single-snapshot
+> dump.
+
+### go-load --resume
+
+State lives in `<directory>/load-state.json`, written atomically after every
+completed file **and after every committed transaction batch** inside large
+data files. Data files load in explicit transactions (committed every 64&nbsp;MB
+of statements), and only committed statements are recorded — so a load killed
+mid-file resumes exactly after its last commit, never re-inserting rows the
+target already has:
+
+```bash
+# Original load dies partway through:
+go-load --host target --user root --password ... --directory /backups/myapp --workers 4 --resume
+
+# Rerun with the same command — worker count can change freely:
+go-load --host target --user root --password ... --directory /backups/myapp --workers 8 --resume
+```
+
+```
+INFO Resume: 5 file(s) already loaded
+INFO Resume: skipping schema myapp.orders-definition.sql
+INFO Resume: myapp.orders-thread1.sql — continuing after 16 committed statement(s)
+```
+
+- Pass `--resume` on the **first** run too: it costs nothing and makes the
+  state file available if the load dies.
+- `load-state.json` is keyed by file name; it applies to one dump directory
+  loaded into one target. Delete it to force a full reload, and never reuse a
+  directory's state file against a different target.
+- Transient connection drops (server gone away, lost connection) are retried
+  in-process from the last committed batch automatically, with or without
+  `--resume`.
 
 ---
 
