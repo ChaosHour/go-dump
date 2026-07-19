@@ -1,8 +1,11 @@
 package load
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -376,5 +379,137 @@ func touch(t *testing.T, dir, name string) {
 	t.Helper()
 	if err := os.WriteFile(filepath.Join(dir, name), []byte{}, 0644); err != nil {
 		t.Fatalf("touch %s: %v", name, err)
+	}
+}
+
+// --- batchStream / mid-file resume ---
+
+// runBatchStream feeds sql through batchStream and returns every statement
+// handed to exec (including BEGIN/COMMIT) plus each progress value reported.
+func runBatchStream(t *testing.T, sql string, skip int64, batchBytes uint64) (execed []string, commits []int64) {
+	t.Helper()
+	err := batchStream(strings.NewReader(sql), skip, batchBytes,
+		func(stmt string) error {
+			execed = append(execed, stmt)
+			return nil
+		},
+		func(n int64) error {
+			commits = append(commits, n)
+			return nil
+		})
+	if err != nil {
+		t.Fatalf("batchStream: %v", err)
+	}
+	return execed, commits
+}
+
+func TestBatchStream_WrapsInTransaction(t *testing.T) {
+	execed, commits := runBatchStream(t,
+		"INSERT INTO `t` VALUES (1);\nINSERT INTO `t` VALUES (2);", 0, 1<<20)
+
+	want := []string{"BEGIN", "INSERT INTO `t` VALUES (1)", "INSERT INTO `t` VALUES (2)", "COMMIT"}
+	if !reflect.DeepEqual(execed, want) {
+		t.Errorf("execed = %v, want %v", execed, want)
+	}
+	if !reflect.DeepEqual(commits, []int64{2}) {
+		t.Errorf("commits = %v, want [2]", commits)
+	}
+}
+
+func TestBatchStream_CommitsOnBatchBytes(t *testing.T) {
+	// batchBytes of 1 forces a commit after every statement.
+	execed, commits := runBatchStream(t,
+		"INSERT INTO `t` VALUES (1);\nINSERT INTO `t` VALUES (2);\nINSERT INTO `t` VALUES (3);", 0, 1)
+
+	want := []string{
+		"BEGIN", "INSERT INTO `t` VALUES (1)", "COMMIT",
+		"BEGIN", "INSERT INTO `t` VALUES (2)", "COMMIT",
+		"BEGIN", "INSERT INTO `t` VALUES (3)", "COMMIT",
+	}
+	if !reflect.DeepEqual(execed, want) {
+		t.Errorf("execed = %v, want %v", execed, want)
+	}
+	if !reflect.DeepEqual(commits, []int64{1, 2, 3}) {
+		t.Errorf("commits = %v, want [1 2 3]", commits)
+	}
+}
+
+func TestBatchStream_SkipReplaysOnlyUse(t *testing.T) {
+	sql := "USE `mydb`;\n" +
+		"INSERT INTO `t` VALUES (1);\n" +
+		"INSERT INTO `t` VALUES (2);\n" +
+		"INSERT INTO `t` VALUES (3);"
+
+	// Resume after 2 committed statements (the USE and the first INSERT):
+	// the USE must be replayed for session state, the INSERT must not.
+	execed, commits := runBatchStream(t, sql, 2, 1<<20)
+
+	want := []string{
+		"USE `mydb`",
+		"BEGIN", "INSERT INTO `t` VALUES (2)", "INSERT INTO `t` VALUES (3)", "COMMIT",
+	}
+	if !reflect.DeepEqual(execed, want) {
+		t.Errorf("execed = %v, want %v", execed, want)
+	}
+	// Progress counts are cumulative over the whole file, including skipped.
+	if !reflect.DeepEqual(commits, []int64{4}) {
+		t.Errorf("commits = %v, want [4]", commits)
+	}
+}
+
+func TestBatchStream_FullySkippedFile(t *testing.T) {
+	sql := "USE `mydb`;\nINSERT INTO `t` VALUES (1);"
+	execed, commits := runBatchStream(t, sql, 2, 1<<20)
+
+	// Only the USE replays; nothing new to commit, so no progress calls.
+	if !reflect.DeepEqual(execed, []string{"USE `mydb`"}) {
+		t.Errorf("execed = %v, want only the USE", execed)
+	}
+	if len(commits) != 0 {
+		t.Errorf("commits = %v, want none", commits)
+	}
+}
+
+func TestBatchStream_ExecErrorStopsBeforeProgress(t *testing.T) {
+	sql := "INSERT INTO `t` VALUES (1);\nINSERT INTO `t` VALUES (2);"
+	boom := errors.New("boom")
+	var commits []int64
+	err := batchStream(strings.NewReader(sql), 0, 1<<20,
+		func(stmt string) error {
+			if strings.Contains(stmt, "(2)") {
+				return boom
+			}
+			return nil
+		},
+		func(n int64) error {
+			commits = append(commits, n)
+			return nil
+		})
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v, want boom", err)
+	}
+	if len(commits) != 0 {
+		t.Errorf("progress reported %v despite no COMMIT", commits)
+	}
+}
+
+func TestIsUseStatement(t *testing.T) {
+	cases := []struct {
+		stmt string
+		want bool
+	}{
+		{"USE `mydb`", true},
+		{"use mydb", true},
+		{"Use\tmydb", true},
+		{"USE`mydb`", true},
+		{"USER SELECT", false},
+		{"INSERT INTO `use` VALUES (1)", false},
+		{"USE", false},
+		{"", false},
+	}
+	for _, c := range cases {
+		if got := isUseStatement(c.stmt); got != c.want {
+			t.Errorf("isUseStatement(%q) = %v, want %v", c.stmt, got, c.want)
+		}
 	}
 }

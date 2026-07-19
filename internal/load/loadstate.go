@@ -9,9 +9,13 @@ import (
 
 // LoadState persists which files have been successfully loaded, enabling --resume.
 // Written atomically to <directory>/load-state.json after each successful file load.
+// FileProgress tracks partially-loaded data files by the number of statements
+// committed so far, so an interrupted load resumes mid-file instead of
+// replaying rows that are already in the target.
 type LoadState struct {
-	StartTime      time.Time `json:"start_time"`
-	CompletedFiles []string  `json:"completed_files"`
+	StartTime      time.Time        `json:"start_time"`
+	CompletedFiles []string         `json:"completed_files"`
+	FileProgress   map[string]int64 `json:"file_progress,omitempty"`
 
 	mu    sync.Mutex
 	path  string
@@ -22,8 +26,9 @@ type LoadState struct {
 func NewLoadState(dir string) (*LoadState, error) {
 	path := dir + "/load-state.json"
 	ls := &LoadState{
-		path:  path,
-		index: make(map[string]bool),
+		path:         path,
+		index:        make(map[string]bool),
+		FileProgress: make(map[string]int64),
 	}
 
 	data, err := os.ReadFile(path)
@@ -36,6 +41,9 @@ func NewLoadState(dir string) (*LoadState, error) {
 	}
 	if err := json.Unmarshal(data, ls); err != nil {
 		return nil, err
+	}
+	if ls.FileProgress == nil {
+		ls.FileProgress = make(map[string]int64)
 	}
 	for _, f := range ls.CompletedFiles {
 		ls.index[f] = true
@@ -57,7 +65,26 @@ func (ls *LoadState) Len() int {
 	return len(ls.CompletedFiles)
 }
 
+// Progress returns the number of statements already committed for a
+// partially-loaded file, or 0 when the file has not been started.
+func (ls *LoadState) Progress(name string) int64 {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	return ls.FileProgress[name]
+}
+
+// SetProgress records that n statements of name have been committed and
+// flushes the state file atomically.
+func (ls *LoadState) SetProgress(name string, n int64) error {
+	ls.mu.Lock()
+	defer ls.mu.Unlock()
+	ls.FileProgress[name] = n
+	return ls.write()
+}
+
 // Mark records name as complete and flushes the state file atomically.
+// Any partial progress entry for name is dropped — completed files are
+// tracked by CompletedFiles alone.
 func (ls *LoadState) Mark(name string) error {
 	ls.mu.Lock()
 	defer ls.mu.Unlock()
@@ -66,6 +93,7 @@ func (ls *LoadState) Mark(name string) error {
 	}
 	ls.index[name] = true
 	ls.CompletedFiles = append(ls.CompletedFiles, name)
+	delete(ls.FileProgress, name)
 	return ls.write()
 }
 

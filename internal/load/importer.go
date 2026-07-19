@@ -141,7 +141,7 @@ func (imp *Importer) ImportDirectory(ctx context.Context, dir, pattern string, l
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if err := imp.loadFile(ctx, fl.Path); err != nil {
+			if err := imp.loadDataFile(ctx, fl.Path, ls); err != nil {
 				errsCh <- fmt.Errorf("%s: %w", fname, err)
 				return
 			}
@@ -200,9 +200,18 @@ func (imp *Importer) ImportFile(ctx context.Context, path string) error {
 
 const maxRetries = 3
 
+// txBatchBytes is the transaction size for data files: statements are applied
+// inside explicit transactions committed once this many statement bytes have
+// accumulated. Commits are the durability points for mid-file resume — only
+// committed statements are recorded in load-state.json, so a crash or retry
+// never re-applies rows the target already has.
+const txBatchBytes = 64 * 1024 * 1024
+
 // loadFile opens path (plain, .gz, or .zst), acquires a dedicated connection,
 // sets session variables, and streams SQL statements one at a time.
 // Retries up to maxRetries times on transient MySQL connection errors.
+// Used for schema and post-data (routine/event/trigger) files, whose DDL
+// statements commit implicitly and cannot be batched.
 func (imp *Importer) loadFile(ctx context.Context, path string) error {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
@@ -224,8 +233,63 @@ func (imp *Importer) loadFile(ctx context.Context, path string) error {
 	return fmt.Errorf("after %d attempts: %w", maxRetries, lastErr)
 }
 
+// loadDataFile loads a data file inside batched transactions with
+// statement-level progress, so an interrupted or retried load never
+// re-applies committed rows. Progress is kept in memory for transparent
+// retries and, when ls is non-nil, persisted to load-state.json so a later
+// --resume run continues mid-file (like mysqlsh's load progress file).
+func (imp *Importer) loadDataFile(ctx context.Context, path string, ls *LoadState) error {
+	name := filepath.Base(path)
+	applied := int64(0)
+	if ls != nil {
+		applied = ls.Progress(name)
+		if applied > 0 {
+			log.Infof("Resume: %s — continuing after %d committed statement(s)", name, applied)
+		}
+	}
+	progress := func(total int64) error {
+		applied = total
+		if ls != nil {
+			if err := ls.SetProgress(name, total); err != nil {
+				return fmt.Errorf("record progress for %s: %w", name, err)
+			}
+		}
+		return nil
+	}
+
+	var lastErr error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt*attempt) * time.Second
+			log.Warningf("Retry %d/%d for %s (waiting %s, resuming after %d statements): %v",
+				attempt, maxRetries-1, name, delay, applied, lastErr)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		lastErr = imp.withFileConn(ctx, path, func(conn *sql.Conn, r io.Reader) error {
+			return execBatched(ctx, conn, r, applied, progress)
+		})
+		if lastErr == nil || !isRetryable(lastErr) {
+			return lastErr
+		}
+	}
+	return fmt.Errorf("after %d attempts: %w", maxRetries, lastErr)
+}
+
 // doLoadFile performs a single attempt at loading path.
 func (imp *Importer) doLoadFile(ctx context.Context, path string) error {
+	return imp.withFileConn(ctx, path, func(conn *sql.Conn, r io.Reader) error {
+		return execStream(ctx, conn, r)
+	})
+}
+
+// withFileConn opens path (plain, .gz, or .zst), acquires a dedicated
+// connection with the load session variables set, and hands the decompressed
+// statement stream to fn.
+func (imp *Importer) withFileConn(ctx context.Context, path string, fn func(*sql.Conn, io.Reader) error) error {
 	f, err := os.Open(path)
 	if err != nil {
 		return err
@@ -281,7 +345,7 @@ func (imp *Importer) doLoadFile(ctx context.Context, path string) error {
 		}
 	}
 
-	return execStream(ctx, conn, bufio.NewReaderSize(underlying, 4*1024*1024))
+	return fn(conn, bufio.NewReaderSize(underlying, 4*1024*1024))
 }
 
 // execStream reads from r and executes each SQL statement as it is found.
@@ -293,6 +357,87 @@ func execStream(ctx context.Context, conn *sql.Conn, r io.Reader) error {
 		}
 		return nil
 	})
+}
+
+// execBatched streams statements from r into conn inside explicit
+// transactions, skipping the first skip statements (already committed by a
+// previous attempt) and reporting each commit through progress.
+func execBatched(ctx context.Context, conn *sql.Conn, r io.Reader, skip int64, progress func(int64) error) error {
+	return batchStream(r, skip, txBatchBytes, func(stmt string) error {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("exec %q: %w", truncate(stmt, 120), err)
+		}
+		return nil
+	}, progress)
+}
+
+// batchStream drives a resumable, transactional statement stream through
+// exec. Statements are wrapped in BEGIN/COMMIT batches of roughly batchBytes
+// statement bytes; progress is called with the cumulative statement count
+// after every successful COMMIT — and never before it, so the recorded count
+// only ever covers durable rows.
+//
+// The first skip statements are not re-executed, with one exception: USE
+// statements are session state, not data — go-dump writes unqualified
+// INSERTs that rely on the USE line before them, so a resumed stream must
+// replay USE to land the remaining statements in the right schema.
+func batchStream(r io.Reader, skip int64, batchBytes uint64, exec func(string) error, progress func(int64) error) error {
+	var seen int64
+	var inTx bool
+	var txBytes uint64
+
+	err := parseStatements(r, func(stmt string) error {
+		seen++
+		if seen <= skip {
+			if isUseStatement(stmt) {
+				return exec(stmt)
+			}
+			return nil
+		}
+		if !inTx {
+			if err := exec("BEGIN"); err != nil {
+				return err
+			}
+			inTx = true
+			txBytes = 0
+		}
+		if err := exec(stmt); err != nil {
+			return err
+		}
+		txBytes += uint64(len(stmt))
+		if txBytes >= batchBytes {
+			if err := exec("COMMIT"); err != nil {
+				return err
+			}
+			inTx = false
+			return progress(seen)
+		}
+		return nil
+	})
+	if err != nil {
+		// The connection's open transaction (if any) rolls back when the
+		// caller closes it — nothing uncommitted survives to be double-loaded.
+		return err
+	}
+	if inTx {
+		if err := exec("COMMIT"); err != nil {
+			return err
+		}
+		return progress(seen)
+	}
+	return nil
+}
+
+// isUseStatement reports whether stmt is a USE statement ("USE `db`" or
+// "USE db", any case). Statements arrive trimmed from parseStatements.
+func isUseStatement(stmt string) bool {
+	if len(stmt) < 4 {
+		return false
+	}
+	if upperByte(stmt[0]) != 'U' || upperByte(stmt[1]) != 'S' || upperByte(stmt[2]) != 'E' {
+		return false
+	}
+	return stmt[3] == ' ' || stmt[3] == '\t' || stmt[3] == '`'
 }
 
 // parseStatements reads SQL from r and calls cb for each complete statement.
