@@ -75,7 +75,7 @@ func TestApplyResumeFilter_SkipsDone(t *testing.T) {
 	dir := t.TempDir()
 
 	// Write a prior metadata.json with one done table and one pending.
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.AddTable("db", "tableA", 1000)
 	meta.AddTable("db", "tableB", 2000)
 	meta.MarkTableDone("db", "tableA", 10)
@@ -104,7 +104,7 @@ func TestApplyResumeFilter_SkipsDone(t *testing.T) {
 func TestApplyResumeFilter_CleanPartialFiles(t *testing.T) {
 	dir := t.TempDir()
 
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.AddTable("db", "orders", 1000) // pending — partial files should be cleaned
 	_ = meta.Write()
 
@@ -125,7 +125,7 @@ func TestApplyResumeFilter_CleanPartialFiles(t *testing.T) {
 func TestApplyResumeFilter_AllDone(t *testing.T) {
 	dir := t.TempDir()
 
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.AddTable("db", "tableA", 1000)
 	meta.MarkTableDone("db", "tableA", 10)
 	meta.Complete()
@@ -142,13 +142,13 @@ func TestApplyResumeFilter_AllDone(t *testing.T) {
 func TestMergeDoneTables(t *testing.T) {
 	dir := t.TempDir()
 
-	prior := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	prior := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	prior.AddTable("db", "done_table", 1000)
 	prior.AddTable("db", "pending_table", 2000)
 	prior.MarkTableDone("db", "done_table", 7)
 	prior.SetChecksum("db", "done_table", 12345)
 
-	fresh := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	fresh := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	fresh.AddTable("db", "pending_table", 2000) // re-dumped this run
 	fresh.MergeDoneTables(prior)
 
@@ -181,7 +181,7 @@ func TestMergeDoneTables(t *testing.T) {
 
 func TestMaybeMarkDone(t *testing.T) {
 	dir := t.TempDir()
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.AddTable("db", "t1", 100)
 
 	tm := &TaskManager{metadata: meta}
@@ -209,7 +209,7 @@ func TestMaybeMarkDone(t *testing.T) {
 	}
 
 	// Compressed dumps defer marking to the final sweep.
-	meta2 := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta2 := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta2.AddTable("db", "t2", 100)
 	tmC := &TaskManager{metadata: meta2, Compress: true}
 	taskC := &Task{Table: &Table{schema: "db", name: "t2"}, TaskManager: tmC}

@@ -12,7 +12,7 @@ import (
 func TestDumpMetadataLifecycle(t *testing.T) {
 	dir := t.TempDir()
 
-	meta := NewDumpMetadata(dir, "1.0.0", "db01.example.com", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "db01.example.com", 3306, "8.0.43")
 	if meta.Status != "in_progress" {
 		t.Fatalf("expected status in_progress, got %s", meta.Status)
 	}
@@ -83,7 +83,7 @@ func TestDumpMetadataLifecycle(t *testing.T) {
 
 func TestDumpMetadataFail(t *testing.T) {
 	dir := t.TempDir()
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.Fail()
 
 	loaded, err := LoadDumpMetadata(dir)
@@ -100,7 +100,7 @@ func TestDumpMetadataFail(t *testing.T) {
 
 func TestDumpMetadataSetChecksum(t *testing.T) {
 	dir := t.TempDir()
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	meta.AddTable("db", "tbl", 1000)
 	meta.SetChecksum("db", "tbl", 987654321)
 	_ = meta.Write()
@@ -155,7 +155,7 @@ func TestLoadDumpMetadata_Corrupt(t *testing.T) {
 
 func TestDumpMetadataAtomicWrite(t *testing.T) {
 	dir := t.TempDir()
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 
 	// Write several times rapidly — no tmp file should be left behind.
 	for i := 0; i < 20; i++ {
@@ -185,7 +185,7 @@ func TestDumpMetadataAtomicWrite(t *testing.T) {
 func TestDumpMetadataStartTime(t *testing.T) {
 	before := time.Now().UTC().Add(-time.Second)
 	dir := t.TempDir()
-	meta := NewDumpMetadata(dir, "1.0.0", "host", "8.0.43")
+	meta := NewDumpMetadata(dir, "1.0.0", "host", 3306, "8.0.43")
 	after := time.Now().UTC().Add(time.Second)
 
 	if meta.StartTime.Before(before) || meta.StartTime.After(after) {

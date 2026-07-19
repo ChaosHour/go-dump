@@ -111,6 +111,7 @@ func Run(ctx context.Context, opts *DumpOptions) {
 			opts.DestinationDir,
 			opts.AppVersion,
 			opts.MySQLHost.HostName,
+			opts.MySQLHost.Port,
 			taskManager.MySQLVersion(),
 		)
 		activeMeta = meta

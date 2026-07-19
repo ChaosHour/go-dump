@@ -39,6 +39,11 @@ func main() {
 		force         bool
 		verify        bool
 		resume        bool
+		showRepl      bool
+		sourceHost    string
+		sourcePort    int
+		replUser      string
+		replPassword  string
 		quiet         bool
 		debug         bool
 		iniFile       string
@@ -61,6 +66,11 @@ func main() {
 	flag.BoolVar(&force, "force", false, "With --set-gtid-purged: allow acting on a stopped replication channel, and allow RESET MASTER / RESET BINARY LOGS AND GTIDS when the target's gtid_executed is non-empty (destroys the target's binlog history).")
 	flag.BoolVar(&verify, "verify", false, "Verify checksums after loading (requires checksums.txt in --directory)")
 	flag.BoolVar(&resume, "resume", false, "Resume a previous load: skip files recorded in load-state.json and continue partially-loaded data files after their last committed statement. --workers may differ between runs.")
+	flag.BoolVar(&showRepl, "show-replication", false, "Print ready-to-run replication setup SQL (GTID AUTO_POSITION and binlog file/position) parsed from the dump's metadata.json in --directory, then exit. Connects to nothing and executes nothing.")
+	flag.StringVar(&sourceHost, "source-host", "", "With --show-replication: source host for the statements (default: mysql_host from metadata.json — override when the replica reaches the source by another address)")
+	flag.IntVar(&sourcePort, "source-port", 0, "With --show-replication: source port (default: mysql_port from metadata.json, else 3306)")
+	flag.StringVar(&replUser, "repl-user", "", "With --show-replication: replication user for the statements (default: <repl_user> placeholder)")
+	flag.StringVar(&replPassword, "repl-password", "", "With --show-replication: replication password (or set GOLOAD_REPL_PASSWORD env var; default: <repl_password> placeholder)")
 	flag.BoolVar(&quiet, "quiet", false, "Suppress INFO messages")
 	flag.BoolVar(&debug, "debug", false, "Print debug information")
 	flag.StringVar(&iniFile, "ini-file", "", "INI configuration file (supports [client] and [go-load] sections)")
@@ -100,6 +110,48 @@ func main() {
 	}
 	if setGtidPurged && directory == "" {
 		log.Fatal("--set-gtid-purged requires --directory (the GTID set comes from the dump's metadata.json).")
+	}
+
+	// --show-replication: parse metadata.json, print the setup SQL, exit.
+	// Read-only — no MySQL connection, no load. Output goes to stdout so it
+	// can be reviewed, redirected, or piped into the mysql client.
+	if showRepl {
+		if directory == "" {
+			log.Fatal("--show-replication requires --directory (coordinates come from the dump's metadata.json).")
+		}
+		meta, err := dump.LoadDumpMetadata(directory)
+		if err != nil {
+			log.Fatalf("--show-replication: cannot read metadata.json: %v", err)
+		}
+		if meta.Status != "complete" {
+			log.Warningf("Dump status is %q, not \"complete\" — its coordinates may not describe a restorable dump.", meta.Status)
+		}
+		if replPassword == "" {
+			if env := os.Getenv("GOLOAD_REPL_PASSWORD"); env != "" {
+				replPassword = env
+			}
+		}
+		info := load.ReplicationInfo{
+			SourceHost:   sourceHost,
+			SourcePort:   sourcePort,
+			ReplUser:     replUser,
+			ReplPassword: replPassword,
+			BinlogFile:   meta.BinlogFile,
+			BinlogPos:    meta.BinlogPosition,
+			GTIDSet:      meta.GTIDSet,
+		}
+		if info.SourceHost == "" {
+			info.SourceHost = meta.MySQLHost
+		}
+		if info.SourcePort == 0 {
+			info.SourcePort = meta.MySQLPort
+		}
+		sqlText, err := load.BuildReplicationSQL(info)
+		if err != nil {
+			log.Fatalf("--show-replication: %v", err)
+		}
+		fmt.Print(sqlText)
+		return
 	}
 
 	db, err := connect(host, port, user, password, socket, database)

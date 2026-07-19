@@ -604,6 +604,7 @@ Written at dump start (`status: in_progress`) and updated on clean finish
   "end_time": "2026-06-10T14:05:30Z",
   "status": "complete",
   "mysql_host": "db01.example.com",
+  "mysql_port": 3306,
   "mysql_version": "8.0.43",
   "binlog_file": "binlog.000042",
   "binlog_position": 1421,
@@ -745,7 +746,7 @@ Two distinct workflows:
 
 | Goal | How |
 |------|-----|
-| Seed a new replica and start replication | Dump **with** `--get-master-status`, restore with `--skip-binlog --set-gtid-purged`, run the generated `change-replication-source.sql` |
+| Seed a new replica and start replication | Dump **with** `--get-master-status`, restore with `--skip-binlog --set-gtid-purged`, then run the SQL printed by `go-load --show-replication` (or edit the generated `change-replication-source.sql`) |
 | Repopulate tables/databases without touching replication | Dump **without** `--get-master-status` (the default) and just restore |
 
 A complete real-world transcript of re-seeding a live replica — including the
@@ -928,8 +929,49 @@ CHANGE REPLICATION SOURCE TO
 > - `SET GLOBAL gtid_purged` requires `SUPER` / `SYSTEM_VARIABLES_ADMIN`, which
 >   managed services (Cloud SQL, RDS) do not grant — use the provider's external
 >   replication API there instead.
-> - These post-restore steps are manual today. Automating them in go-load is
->   planned — see [docs/GTID-REPLICATION.md](docs/GTID-REPLICATION.md).
+> - The replication setup itself stays a manual, reviewed step by design —
+>   `go-load --show-replication` (below) prints the exact statements with the
+>   dump's recorded coordinates filled in; you run them when you're ready.
+>   See also [docs/GTID-REPLICATION.md](docs/GTID-REPLICATION.md).
+
+### Printing the replication statements (`--show-replication`)
+
+`go-load --show-replication` parses the dump's `metadata.json` (plain JSON —
+no scraping of SQL comments) and prints ready-to-run setup SQL for **both**
+modes: GTID `SOURCE_AUTO_POSITION = 1` and binlog file/position. It connects
+to nothing and executes nothing — review the output, then run it manually or
+pipe it into the mysql client:
+
+```bash
+# Placeholders for user/password unless provided:
+go-load --directory /backups/myapp --show-replication
+
+# Fully filled in and runnable as-is. --source-host/--source-port override the
+# recorded values when the replica reaches the source by another address
+# (metadata records the host/port the DUMP used, e.g. 127.0.0.1 via a tunnel):
+go-load --directory /backups/myapp --show-replication \
+  --source-host primary1.db.internal --source-port 3306 \
+  --repl-user repl --repl-password 'secret'   # or GOLOAD_REPL_PASSWORD env
+
+# Manual-but-piped:
+go-load --directory /backups/myapp --show-replication ... | mysql -h replica1 -u root -p
+```
+
+When the dump has a GTID set, the AUTO_POSITION block is runnable and the
+file/position block is a commented alternative (plus a commented MySQL 5.7
+`CHANGE MASTER` variant). The `SET GLOBAL gtid_purged` line is printed
+commented — prefer `go-load --set-gtid-purged`, which applies it with errant-
+transaction and running-channel safety gates.
+
+**How the coordinates are captured** (dump side, `--get-master-status`): the
+classic mysqldump pattern — take the lock (`FLUSH TABLES WITH READ LOCK`, or
+`LOCK TABLES ... READ` when the dumped set is InnoDB-only), open every
+worker's `START TRANSACTION WITH CONSISTENT SNAPSHOT`, run
+`SHOW MASTER STATUS` (8.4+: `SHOW BINARY LOG STATUS`) — one statement that
+returns binlog file, position, **and** `Executed_Gtid_Set` atomically — then
+`UNLOCK TABLES` immediately. The lock window is milliseconds and bounded by
+`--lock-wait-timeout`, and the coordinates are guaranteed to match the worker
+snapshots because both are pinned under the same lock.
 
 ### Dumping without GTIDs (repopulating tables, replication-safe)
 
