@@ -1,7 +1,9 @@
 # GTID & Replication: current state, gaps, and planned features
 
-Status of GTID handling in go-dump/go-load as of 2026-07-03, and the work needed
-to make replica seeding a one-command operation.
+Status of GTID handling in go-dump/go-load as of 2026-07-19. Replica seeding
+is now a one-command operation (`go-load --skip-binlog --set-gtid-purged
+--start-replication`); this document tracks how each piece works and what
+remains open.
 
 ## What works today
 
@@ -13,8 +15,8 @@ to make replica seeding a one-command operation.
   `GetTransactions`). The recorded binlog file/position and `Executed_Gtid_Set`
   therefore match the dumped data exactly — correct for replica seeding.
 - Coordinates are persisted twice:
-  - `metadata.json` → `binlog_file`, `binlog_position`, `gtid_set`
-    (`internal/dump/metadata.go`, `SetBinlog`)
+  - `metadata.json` → `mysql_host`, `mysql_port` (0.3.0+), `binlog_file`,
+    `binlog_position`, `gtid_set` (`internal/dump/metadata.go`, `SetBinlog`)
   - `master-data.sql` → human-readable text report
 - `--get-slave-status` records `SHOW REPLICA STATUS` (incl. `Executed_Gtid_Set`
   / MariaDB `Gtid_Slave_Pos`, multi-source aware) to `slave-data.sql` — useful
@@ -40,8 +42,10 @@ to make replica seeding a one-command operation.
 - `go-load --set-gtid-purged` applies the dump's GTID set to the target after
   the load, with errant-transaction and running-replica guards
   (`internal/load/gtid.go`) — see item 1 below.
-- Only `CHANGE REPLICATION SOURCE TO` + `START REPLICA` remain manual, and the
-  dump ships a filled-in template (`change-replication-source.sql`) for them.
+- `CHANGE REPLICATION SOURCE TO` + `START REPLICA` can run three ways:
+  automatically (`go-load --start-replication`, item 3 below), from printed
+  SQL reviewed by the operator (`go-load --show-replication`), or from the
+  dump's filled-in template (`change-replication-source.sql`).
 
 ## Gaps / planned features
 
@@ -90,7 +94,7 @@ nothing to `gtid_executed`, so `RESET MASTER` may be skippable when the target
 started empty. `--set-gtid-purged` should check `@@gtid_executed` at runtime
 instead of assuming.
 
-### 3. `go-load --change-source` / emit a helper script at dump time
+### 3. `go-load --start-replication` / `--show-replication` — ✅ DONE (2026-07-19)
 
 - **Dump-time template — ✅ DONE (2026-07-03):** with `--get-master-status`,
   go-dump writes `change-replication-source.sql`
@@ -98,12 +102,42 @@ instead of assuming.
   GTID auto-position as the active statements, 5.7 and file/position variants
   commented. Always plain (never gzipped); go-load's `findFiles` skips it
   during restore.
-- **Load-time `--change-source` — still open:** `go-load --change-source
-  --source-host ... --source-user ... --source-password-env ...` runs
-  `CHANGE REPLICATION SOURCE TO ... SOURCE_AUTO_POSITION=1` + `START REPLICA`
-  after `--set-gtid-purged`, then polls `SHOW REPLICA STATUS` until the
-  threads run or a timeout. Version-gate the syntax (`CHANGE MASTER TO` +
-  `MASTER_AUTO_POSITION`, `START SLAVE` on 5.7).
+- **`go-load --show-replication` — ✅ DONE (2026-07-19):** read-only; parses
+  `metadata.json` (never scrapes SQL comments) and prints ready-to-run setup
+  SQL to a clean stdout: GTID auto-position runnable, file/position and 5.7
+  `CHANGE MASTER` as commented variants. `--source-host/--source-port/
+  --repl-user/--repl-password` (or `GOLOAD_REPL_PASSWORD`) fill in what
+  metadata cannot know; placeholders otherwise. GTID set is validated by the
+  same sanitizer as `--set-gtid-purged` before being embedded in SQL
+  (`internal/load/replication.go`, `BuildReplicationSQL`).
+- **`go-load --start-replication` — ✅ DONE (2026-07-19):** executes the setup
+  after the load (and after `--verify` / `--set-gtid-purged`):
+  - `--replication-mode auto|gtid|file-pos`: auto prefers GTID auto-position
+    when the dump has a `gtid_set` and the target has `gtid_mode=ON`, else
+    binlog file/position; explicit modes fail loudly on missing prerequisites
+    (`chooseReplMode`).
+  - Version-gated syntax: `CHANGE REPLICATION SOURCE TO` + `SOURCE_*` +
+    `START REPLICA` on 8.0.23+; `CHANGE MASTER TO` + `MASTER_*` +
+    `START SLAVE` on 5.7/pre-8.0.23; `GET_SOURCE_PUBLIC_KEY` vs
+    `GET_MASTER_PUBLIC_KEY`, omitted entirely before 8.0.4
+    (`buildChangeSourceSQL`).
+  - Safety gates mirror `--set-gtid-purged`: running channel always aborts;
+    configured-but-stopped channel requires `--force`; GTID mode requires
+    `gtid_executed` to **exactly equal** the dump's set (checked with
+    `GTID_SUBTRACT` in both directions — missing GTIDs would make
+    AUTO_POSITION re-fetch rows the load already inserted; extra GTIDs are
+    errant).
+  - `--source-ssl` (`SOURCE_SSL=1`) and `--get-source-public-key` cover
+    `caching_sha2_password` sources without TLS.
+  - After `START REPLICA`, polls replica status (15s bound): both threads
+    `Yes` → success with lag reported; `Last_IO_Error`/`Last_SQL_Error` →
+    immediate hard error (bad credentials surface in seconds, not as a green
+    exit); still `Connecting` at timeout → error with thread states.
+  - Passwords are redacted from every logged statement.
+  - Validated 2026-07-19 against 8.0.46 source → 8.4 replica: one-command
+    seeding (GTID auto-position, 0s behind, new writes applied), wrong
+    password surfaced `Access denied` as a hard error, `file-pos` mode came
+    up with `Auto_Position: 0`.
 
 ### 4. Rename `master-data.sql` / `slave-data.sql` → `.txt`
 
@@ -152,6 +186,7 @@ needs `SET GLOBAL gtid_slave_pos = '...'` +
 2. ~~Dump-time `change-replication-source.sql` template (item 3)~~ — ✅ done
    2026-07-03.
 3. ~~`go-load --set-gtid-purged` (item 1)~~ — ✅ done 2026-07-03.
-4. `go-load --change-source` (item 3, load-time half) — next up.
+4. ~~`go-load --start-replication` + `--show-replication` (item 3, load-time
+   half)~~ — ✅ done 2026-07-19.
 5. File rename (item 4), MariaDB flavor support (item 5), and
    `--set-gtid-purged=append` as follow-ups.

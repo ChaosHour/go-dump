@@ -34,6 +34,7 @@ type DumpMetadata struct {
 	EndTime        *time.Time       `json:"end_time,omitempty"`
 	Status         string           `json:"status"` // "in_progress" | "complete" | "failed"
 	MySQLHost      string           `json:"mysql_host"`
+	MySQLPort      int              `json:"mysql_port,omitempty"`
 	MySQLVersion   string           `json:"mysql_version"`
 	BinlogFile     string           `json:"binlog_file,omitempty"`
 	BinlogPosition int              `json:"binlog_position,omitempty"`
@@ -47,12 +48,13 @@ type DumpMetadata struct {
 }
 
 // NewDumpMetadata initialises a metadata object and writes the initial in_progress file.
-func NewDumpMetadata(destDir, appVersion, mysqlHost, mysqlVersion string) *DumpMetadata {
+func NewDumpMetadata(destDir, appVersion, mysqlHost string, mysqlPort int, mysqlVersion string) *DumpMetadata {
 	m := &DumpMetadata{
 		GoDumpVersion: appVersion,
 		StartTime:     time.Now().UTC(),
 		Status:        "in_progress",
 		MySQLHost:     mysqlHost,
+		MySQLPort:     mysqlPort,
 		MySQLVersion:  mysqlVersion,
 		CharacterSet:  "utf8mb4",
 		path:          destDir + "/metadata.json",
