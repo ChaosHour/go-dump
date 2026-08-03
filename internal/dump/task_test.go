@@ -4,9 +4,32 @@ import (
 	"testing"
 )
 
-var task1 = NewTask("sakila", "city", 1000, 1000, &taskManager)
-var task2 = NewTask("sakila", "country", 1000, 1000, &taskManager)
-var task3 = NewTask("sakila", "store_no_pk", 1000, 1000, &taskManager)
+// task1/task2/task3 are built from struct literals, not NewTask, so these
+// pure SQL-string-generation unit tests never depend on a reachable MySQL
+// server (NewTask -> NewTable queries SHOW CREATE TABLE / information_schema
+// immediately). Package-level var init runs before any -run filter applies,
+// so a nil/unreachable tm.DB here would panic the whole test binary on any
+// environment without live MySQL — e.g. CI (see #17). Live-DB coverage of
+// NewTable/NewTask already exists via TestCreateTaskManager and the
+// docker-compose version matrix (make test-integration / test-versions).
+var task1 = Task{
+	Table:           &Table{schema: "sakila", name: "city", primaryKey: []string{"city_id"}},
+	ChunkSize:       1000,
+	OutputChunkSize: 1000,
+	TaskManager:     &taskManager,
+}
+var task2 = Task{
+	Table:           &Table{schema: "sakila", name: "country", primaryKey: []string{"country_id"}},
+	ChunkSize:       1000,
+	OutputChunkSize: 1000,
+	TaskManager:     &taskManager,
+}
+var task3 = Task{
+	Table:           &Table{schema: "sakila", name: "store_no_pk", uniqueKey: []string{"manager_staff_id"}},
+	ChunkSize:       1000,
+	OutputChunkSize: 1000,
+	TaskManager:     &taskManager,
+}
 
 func TestAddTask(t *testing.T) {
 	taskManager.AddTask(&task1)
