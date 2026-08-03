@@ -29,7 +29,7 @@ func printOption(w io.Writer, f *flag.Flag) {
 
 func PrintUsage(flags map[string]*flag.Flag) {
 	w := tabwriter.NewWriter(os.Stdout, 30, 0, 1, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--triggers] [--routines] [--events] [--skip-definer] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-format str] [--compress-level num] [--where str] [--ini-file str]")
+	fmt.Fprintln(w, "Usage: go-dump  --destination path [--databases str] [--tables str] [--all-databases] [--dry-run | --execute] [--help] [--debug] [--quiet] [--version] [--lock-tables] [--consistent] [--isolation-level str] [--channel-buffer-size num] [--chunk-size num] [--tables-without-uniquekey str] [--threads num] [--mysql-user str] [--mysql-password str] [--mysql-host str] [--mysql-port num] [--mysql-socket path] [--add-drop-table] [--insert-mode str] [--triggers] [--routines] [--events] [--skip-definer] [--get-master-status] [--get-slave-status] [--output-chunk-size num] [--skip-use-database] [--compress] [--compress-format str] [--compress-level num] [--where str] [--ini-file str]")
 	fmt.Fprintln(w, "go-dump dumps a database or a table from a MySQL server and creates SQL statements to recreate each table. One file per table per thread is written to the destination directory.")
 	fmt.Fprint(w, "Example: go-dump --destination /tmp/dbdump --databases mydb --mysql-user myuser --mysql-password password\n\n")
 	fmt.Fprint(w, "Options description\n\n")
@@ -49,7 +49,7 @@ func PrintUsage(flags map[string]*flag.Flag) {
 		printOption(w, flags[opt])
 	}
 	fmt.Fprintln(w, "\n# Output options:")
-	for _, opt := range []string{"destination", "add-drop-table", "triggers", "routines", "events", "skip-definer", "get-master-status", "get-slave-status", "output-chunk-size", "statement-size", "skip-use-database"} {
+	for _, opt := range []string{"destination", "add-drop-table", "insert-mode", "triggers", "routines", "events", "skip-definer", "get-master-status", "get-slave-status", "output-chunk-size", "statement-size", "skip-use-database"} {
 		printOption(w, flags[opt])
 	}
 	w.Flush()
@@ -92,6 +92,7 @@ func main() {
 	flag.BoolVar(&dumpOptions.GetMasterStatus, "get-master-status", false, "Record the binary log position at dump time.")
 	flag.BoolVar(&dumpOptions.GetSlaveStatus, "get-slave-status", false, "Record the replica status at dump time.")
 	flag.BoolVar(&dumpOptions.AddDropTable, "add-drop-table", false, "Prepend DROP TABLE IF EXISTS before each CREATE TABLE (and DROP ... IF EXISTS before triggers/routines/events).")
+	flag.StringVar(&dumpOptions.InsertMode, "insert-mode", dump.InsertModeInsert, "Statement verb for data rows: 'insert', 'replace', or 'insert-ignore'. replace/insert-ignore make a load idempotent against rows already present in the target.")
 	flag.BoolVar(&dumpOptions.DumpTriggers, "triggers", false, "Dump triggers for the dumped tables (<schema>.<table>-triggers.sql).")
 	flag.BoolVar(&dumpOptions.DumpRoutines, "routines", false, "Dump stored procedures and functions for the dumped schemas (<schema>-routines.sql).")
 	flag.BoolVar(&dumpOptions.DumpEvents, "events", false, "Dump events for the dumped schemas (<schema>-events.sql).")
@@ -164,6 +165,13 @@ func main() {
 	default:
 		log.Fatalf("Invalid --tables-without-uniquekey value \"%s\". Valid values: error, single-chunk, skip.",
 			dumpOptions.TablesWithoutUKOption)
+	}
+
+	switch dumpOptions.InsertMode {
+	case dump.InsertModeInsert, dump.InsertModeReplace, dump.InsertModeInsertIgnore:
+	default:
+		log.Fatalf("Invalid --insert-mode value \"%s\". Valid values: insert, replace, insert-ignore.",
+			dumpOptions.InsertMode)
 	}
 
 	if !dumpOptions.LockTables && dumpOptions.Consistent {

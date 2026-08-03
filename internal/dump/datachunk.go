@@ -20,6 +20,27 @@ type DataChunk struct {
 	IsLastChunk   bool
 }
 
+// Insert-statement verbs accepted by --insert-mode.
+const (
+	InsertModeInsert       = "insert"
+	InsertModeReplace      = "replace"
+	InsertModeInsertIgnore = "insert-ignore"
+)
+
+// insertVerb maps --insert-mode to the SQL statement verb. Unrecognized modes
+// (including the zero value) fall back to plain INSERT INTO — main.go
+// validates the flag value up front, so this is a safety net, not a check.
+func insertVerb(mode string) string {
+	switch mode {
+	case InsertModeReplace:
+		return "REPLACE INTO"
+	case InsertModeInsertIgnore:
+		return "INSERT IGNORE INTO"
+	default:
+		return "INSERT INTO"
+	}
+}
+
 // GetWhereSQL returns the WHERE clause for this chunk, merging chunking bounds
 // with any per-table or global WHERE condition from DumpOptions.
 func (dc *DataChunk) GetWhereSQL() string {
@@ -129,8 +150,8 @@ func (dc *DataChunk) Parse(stmt *sql.Stmt, w io.Writer) error {
 	for i, col := range columns {
 		colNames[i] = "`" + col.Name() + "`"
 	}
-	insertPrefix := fmt.Sprintf("INSERT INTO %s (%s) VALUES \n(",
-		dc.Task.Table.GetName(), strings.Join(colNames, ","))
+	insertPrefix := fmt.Sprintf("%s %s (%s) VALUES \n(",
+		insertVerb(dc.Task.TaskManager.DumpOptions.InsertMode), dc.Task.Table.GetName(), strings.Join(colNames, ","))
 
 	firstRow := true
 	var rowsNumber uint64

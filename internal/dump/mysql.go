@@ -3,6 +3,7 @@ package dump
 import (
 	"database/sql"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -52,21 +53,52 @@ func ParseString(s interface{}) []byte {
 	return rets
 }
 
+// whereTableRe matches a bare "table" or "schema.table" identifier — the only
+// shape a per-table --where entry's prefix is allowed to take. It excludes
+// quotes, spaces, and punctuation so a colon inside a condition's own value
+// (most commonly a TIME/DATETIME literal like '2026-06-01 00:00:00') can
+// never be mistaken for the table:condition separator.
+var whereTableRe = regexp.MustCompile(`^[A-Za-z0-9_]+(\.[A-Za-z0-9_]+)?$`)
+
 // ParseWhereCondition parses a --where value and populates opts.
 // Format: "condition" (global) or "db.tbl:condition,db.tbl2:condition2" (per-table).
+//
+// A value is only treated as per-table when every comma-separated entry's
+// text before its first colon matches whereTableRe. Anything else — in
+// particular a global condition whose value contains a colon from a time
+// literal — falls back to being one global condition instead of being
+// silently mis-split (see whereTableRe doc and TestParseWhereCondition_*).
 func ParseWhereCondition(whereValue string, do *DumpOptions) {
-	if !strings.Contains(whereValue, ":") {
+	perTable, ok := parsePerTableWhere(whereValue)
+	if !ok {
 		do.GlobalWhereCondition = whereValue
 		return
 	}
 	if do.WhereConditions == nil {
 		do.WhereConditions = make(map[string]string)
 	}
-	for _, part := range strings.Split(whereValue, ",") {
-		if kv := strings.SplitN(strings.TrimSpace(part), ":", 2); len(kv) == 2 {
-			do.WhereConditions[NormalizeTableName(kv[0])] = kv[1]
-		}
+	for table, condition := range perTable {
+		do.WhereConditions[table] = condition
 	}
+}
+
+func parsePerTableWhere(whereValue string) (map[string]string, bool) {
+	if !strings.Contains(whereValue, ":") {
+		return nil, false
+	}
+	result := make(map[string]string)
+	for _, part := range strings.Split(whereValue, ",") {
+		kv := strings.SplitN(strings.TrimSpace(part), ":", 2)
+		if len(kv) != 2 {
+			return nil, false
+		}
+		table := strings.TrimSpace(kv[0])
+		if !whereTableRe.MatchString(table) {
+			return nil, false
+		}
+		result[NormalizeTableName(table)] = kv[1]
+	}
+	return result, true
 }
 
 // TablesFromString parses a comma-separated "schema.table" list.

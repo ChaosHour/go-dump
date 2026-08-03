@@ -47,3 +47,21 @@ func TestNewLastDataChunk(t *testing.T) {
 		}
 	}
 }
+
+func TestInsertVerb(t *testing.T) {
+	tests := []struct {
+		mode   string
+		expect string
+	}{
+		{mode: "", expect: "INSERT INTO"}, // zero value / unset DumpOptions.InsertMode
+		{mode: InsertModeInsert, expect: "INSERT INTO"},
+		{mode: InsertModeReplace, expect: "REPLACE INTO"},
+		{mode: InsertModeInsertIgnore, expect: "INSERT IGNORE INTO"},
+		{mode: "bogus", expect: "INSERT INTO"}, // main.go rejects this before Parse ever runs
+	}
+	for _, tt := range tests {
+		if got := insertVerb(tt.mode); got != tt.expect {
+			t.Errorf("insertVerb(%q) = %q, want %q", tt.mode, got, tt.expect)
+		}
+	}
+}
