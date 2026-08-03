@@ -16,6 +16,7 @@ type DumpOptions struct {
 	TablesWithoutUKOption string
 	DestinationDir        string
 	AddDropTable          bool
+	InsertMode            string // "insert" (default), "replace", or "insert-ignore" — verb used for data-row statements
 	GetMasterStatus       bool
 	GetSlaveStatus        bool
 	SkipUseDatabase       bool
@@ -66,6 +67,7 @@ func GetDumpOptions() *DumpOptions {
 		LockWaitTimeout:       60,
 		TablesWithoutUKOption: "error",
 		AddDropTable:          false,
+		InsertMode:            InsertModeInsert,
 		GetMasterStatus:       true,
 		GetSlaveStatus:        false,
 		SkipUseDatabase:       false,

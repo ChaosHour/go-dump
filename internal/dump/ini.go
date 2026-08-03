@@ -121,6 +121,10 @@ func parseIniOptions(section *ini.Section, do *DumpOptions, flagSet map[string]b
 			do.GetSlaveStatus, errBool = strconv.ParseBool(key.Value())
 		case "add-drop-table":
 			do.AddDropTable, errBool = strconv.ParseBool(key.Value())
+		case "insert-mode":
+			if key.Value() != "" {
+				do.InsertMode = key.Value()
+			}
 		case "triggers":
 			do.DumpTriggers, errBool = strconv.ParseBool(key.Value())
 		case "routines":

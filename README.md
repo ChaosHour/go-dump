@@ -182,7 +182,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 | `--tables` | — | Comma-separated list of `schema.table` pairs: `mydb.orders,mydb.users`. |
 | `--all-databases` | false | Dump every user database. Excludes `mysql`, `sys`, `information_schema`, `performance_schema` by default. |
 | `--include-system-databases` | false | With `--all-databases`, include the `mysql` schema (minus `slow_log`/`general_log`). Use for on-prem full-cluster migrations. **Do not use with Cloud SQL.** |
-| `--where` | — | Filter rows. Global: `"status = 'active'"`. Per-table: `"db.tbl:expr,db.tbl2:expr"`. |
+| `--where` | — | Filter rows. Global: `"status = 'active'"`. Per-table: `"db.tbl:expr,db.tbl2:expr"` (the per-table prefix must be a bare or `schema.table` identifier — a global condition containing a colon, e.g. a `DATETIME` literal `'2026-06-01 00:00:00'`, is never mistaken for a table prefix). See [Dump with row filters](#dump-with-row-filters-where-conditions) for time-range examples. |
 
 ### Parallelism and chunking
 
@@ -223,6 +223,7 @@ go-dump --ini-file /etc/go-dump/primary.ini --databases myapp --destination /bac
 |------|---------|-------------|
 | `--destination` | — | **Required.** Directory to write dump files. Created if it does not exist. |
 | `--add-drop-table` | false | Prepend `DROP TABLE IF EXISTS` before each `CREATE TABLE` (and `DROP ... IF EXISTS` before each trigger/routine/event). |
+| `--insert-mode` | insert | Statement verb for data rows: `insert`, `replace`, or `insert-ignore`. `replace`/`insert-ignore` make a load idempotent against rows already present in the target — `replace` deletes-then-inserts on a key conflict (re-fires AUTO_INCREMENT and delete+insert triggers, not update triggers); `insert-ignore` silently keeps the existing row instead. go-load requires no changes — it executes whichever verb is in the file. |
 | `--triggers` | false | Dump triggers for the dumped tables → `<schema>.<table>-triggers.sql`. |
 | `--routines` | false | Dump stored procedures and functions for the dumped schemas → `<schema>-routines.sql`. |
 | `--events` | false | Dump events for the dumped schemas → `<schema>-events.sql`. |
@@ -423,8 +424,24 @@ cat /backups/myapp/checksums.txt
 
 ### Dump with row filters (WHERE conditions)
 
+`--where` adds a `WHERE` predicate to every chunk query. It does **not** change
+how chunking works — chunk boundaries are still computed from the table's
+primary/unique key, and the filter is combined with the chunk's key-range
+bounds via `AND` (`internal/dump/datachunk.go` `GetWhereSQL`). That means:
+
+- No index on the filtered column is required for correctness — every chunk
+  still applies the filter as a normal `WHERE` clause during its keyed scan.
+  For a large table, an index on the filtered column (or a composite index
+  starting with it) avoids a full scan per chunk.
+- The filter reduces which *rows* are written, not how many *chunks* are
+  planned — a time range that matches 1% of rows still probes the same
+  number of chunk boundaries across the full key range. For a narrow,
+  recent time slice on a huge table, `--tables-without-uniquekey
+  single-chunk` (single streamed query, no chunk-boundary probing) or a
+  plain `mysql` export may be cheaper than chunked go-dump.
+
 ```bash
-# Global filter — applies to every table
+# Global filter — applies to every table in the dump
 go-dump \
   --ini-file /etc/go-dump/prod.ini \
   --databases myapp \
@@ -440,6 +457,42 @@ go-dump \
   --where "myapp.orders:total > 100.00,myapp.customers:country = 'US'" \
   --execute
 ```
+
+#### Time-range filter on a `DATETIME`/`TIMESTAMP` column
+
+Yes — filtering on a column like `last_update` works the same way as any
+other `--where` condition. Use `>=` / `<` (not `BETWEEN`) so the upper bound
+is a clean exclusive boundary and re-running with a shifted window never
+double-counts the boundary row:
+
+```bash
+# Single table, one month of last_update, single-quoted so the shell
+# passes the double-quoted --where value through untouched
+go-dump \
+  --ini-file /etc/go-dump/prod.ini \
+  --tables myapp.orders \
+  --destination /backups/orders-2026-06 \
+  --where "last_update >= '2026-06-01 00:00:00' AND last_update < '2026-07-01 00:00:00'" \
+  --checksum \
+  --execute
+
+# Same time range, but only for one table among several being dumped —
+# per-table syntax. The condition's own colons (from the time literals)
+# are safe here: only the "myapp.orders" prefix before the first colon is
+# read as the table key, everything after it is the condition verbatim.
+go-dump \
+  --ini-file /etc/go-dump/prod.ini \
+  --databases myapp \
+  --destination /backups/filtered-2026-06 \
+  --where "myapp.orders:last_update >= '2026-06-01 00:00:00' AND last_update < '2026-07-01 00:00:00'" \
+  --execute
+```
+
+Caveats specific to per-table syntax: entries are split on top-level commas,
+so a condition that itself contains a comma (e.g. `status IN ('a','b')`)
+will desync the split if used per-table — use the global form instead when
+the condition needs a comma, or filter a single table with `--tables` +
+global `--where` as in the first example above.
 
 ### Compressed dump
 
