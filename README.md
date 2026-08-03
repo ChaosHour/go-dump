@@ -120,6 +120,37 @@ The `VERSION` file controls the embedded version string. Override at build time:
 make build VERSION=1.2.0
 ```
 
+### Releasing
+
+Tagged releases are built by [GoReleaser](https://goreleaser.com) via
+`.github/workflows/release.yml`, triggered on push of a `v*` tag:
+
+```bash
+# 1. Bump VERSION, commit it
+echo "1.2.0" > VERSION
+git add VERSION && git commit -m "Bump VERSION to 1.2.0"
+git push origin main
+
+# 2. Tag and push — this triggers the release workflow
+git tag -a v1.2.0 -m "v1.2.0 — <summary>"
+git push origin v1.2.0
+```
+
+CI runs `make test-unit`, then GoReleaser cross-compiles both binaries for
+linux/darwin × amd64/arm64, packages each as a `.tar.gz` (binary + LICENSE +
+README), generates `checksums.txt`, and publishes them to the GitHub
+Release for that tag (creating it if it doesn't already exist — `.goreleaser.yaml`
+`release.mode: append` never overwrites an existing release's notes, so
+release notes can also be written by hand with `gh release create`/`gh release edit`
+either before or after the tag push).
+
+Validate the config or produce a local build without publishing:
+
+```bash
+goreleaser check
+goreleaser release --snapshot --clean --skip=publish   # output in dist/
+```
+
 ---
 
 ## Quick start

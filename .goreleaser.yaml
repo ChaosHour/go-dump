@@ -1,0 +1,72 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: go-dump
+    main: ./cmd/go-dump
+    binary: go-dump
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.AppVersion={{ .Version }}
+
+  - id: go-load
+    main: ./cmd/go-load
+    binary: go-load
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.AppVersion={{ .Version }}
+
+# Two binaries per platform, so each gets its own archive rather than
+# goreleaser's default of one archive per build/platform combo.
+archives:
+  - id: go-dump
+    ids: [go-dump]
+    name_template: >-
+      go-dump_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+  - id: go-load
+    ids: [go-load]
+    name_template: >-
+      go-load_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+    formats: [tar.gz]
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+
+# Release notes are written by hand (see prior v0.1.0-v0.3.1 releases) —
+# no auto-generated changelog body.
+changelog:
+  disable: true
+
+release:
+  # append: if a release for this tag already exists (e.g. created by hand
+  # with `gh release create` before or after the tag push), add these
+  # binaries/checksums to it instead of overwriting its notes. If no release
+  # exists yet, goreleaser creates one — edit its notes afterward with
+  # `gh release edit`.
+  mode: append

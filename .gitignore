@@ -47,3 +47,4 @@ log/*
 # Multi-version matrix test output and manual test dumps
 test/matrix-out/
 /test-seed/
+dist/
